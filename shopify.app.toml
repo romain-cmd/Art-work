@@ -2,7 +2,7 @@
 
 client_id = "eb1370d42caa2857944903e887d21ba5"
 name = "Art-Work Soft"
-application_url = "https://example.com"
+application_url = "https://app-production-4da6.up.railway.app"
 embedded = true
 
 [build]
@@ -28,7 +28,7 @@ api_version = "2026-10"
 scopes = "write_products,write_metaobjects,write_metaobject_definitions,read_draft_orders,write_draft_orders,read_orders,write_files"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://app-production-4da6.up.railway.app/api/auth" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
