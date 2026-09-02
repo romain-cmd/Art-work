@@ -142,7 +142,7 @@ export const loader = async ({ request }) => {
         draftOrders(
           first: $limit
           query: "status:open OR status:completed"
-          sortKey: CREATED_AT
+          sortKey: ID
           reverse: true
         ) {
           edges {
