@@ -162,8 +162,8 @@ function PartnerEmailsForm({ defaultValues }) {
     <div className="rg-card">
       <p className="rg-card-title">🤝 Partenaires par type de personnalisation</p>
       <p className="rg-card-subtitle">
-        Pré-rempli automatiquement le champ email sur les cartes Kanban de ce
-        type. Mis à jour automatiquement à chaque envoi depuis le Kanban.
+        Pré-rempli automatiquement le champ email sur les cartes de Suivi de
+        production de ce type. Mis à jour automatiquement à chaque envoi.
       </p>
       <form ref={formRef}>
         <input type="hidden" name="intent" value="save-partner-emails" />

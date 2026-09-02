@@ -570,7 +570,7 @@ export default function Kanban() {
   };
 
   return (
-    <s-page heading="Kanban production">
+    <s-page heading="Suivi de production">
       <style>{KANBAN_STYLES}</style>
 
       {cards.length === 0 && (
