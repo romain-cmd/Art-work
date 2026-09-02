@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types -- no PropTypes package in this project */
 import { useEffect, useRef, useState } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useNavigate, useNavigation } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -126,13 +126,25 @@ function getOrderStatus(orderPersonalizations) {
   return "valide";
 }
 
+const PAGE_SIZE = 50;
+const MAX_LIMIT = 250; // plafond de sécurité (limite max de l'API Shopify)
+
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
 
+  const url = new URL(request.url);
+  const requestedLimit = Number(url.searchParams.get("limit")) || PAGE_SIZE;
+  const limit = Math.min(Math.max(requestedLimit, PAGE_SIZE), MAX_LIMIT);
+
   const response = await admin.graphql(
     `#graphql
-      query getDraftOrders {
-        draftOrders(first: 50, query: "status:open OR status:completed") {
+      query getDraftOrders($limit: Int!) {
+        draftOrders(
+          first: $limit
+          query: "status:open OR status:completed"
+          sortKey: CREATED_AT
+          reverse: true
+        ) {
           edges {
             node {
               id
@@ -149,12 +161,17 @@ export const loader = async ({ request }) => {
               }
             }
           }
+          pageInfo {
+            hasNextPage
+          }
         }
-      }`
+      }`,
+    { variables: { limit } }
   );
 
   const data = await response.json();
   const draftOrders = data.data.draftOrders.edges.map((edge) => edge.node);
+  const hasNextPage = data.data.draftOrders.pageInfo.hasNextPage;
   const draftOrderIds = draftOrders.map((order) => order.id);
 
   const personalizations = await prisma.personalization.findMany({
@@ -163,7 +180,7 @@ export const loader = async ({ request }) => {
     orderBy: { createdAt: "asc" },
   });
 
-  return { draftOrders, personalizations };
+  return { draftOrders, personalizations, hasNextPage, limit };
 };
 
 export const action = async ({ request }) => {
@@ -812,9 +829,16 @@ function AttentionBanner({ proofs }) {
 }
 
 export default function Personnalisation() {
-  const { draftOrders, personalizations } = useLoaderData();
+  const { draftOrders, personalizations, hasNextPage, limit } = useLoaderData();
+  const navigate = useNavigate();
+  const navigation = useNavigation();
   const [selectedItem, setSelectedItem] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
+  const isLoadingMore = navigation.state !== "idle";
+
+  const handleLoadMore = () => {
+    navigate(`?limit=${limit + PAGE_SIZE}`, { preventScrollReset: true });
+  };
 
   const orderNameById = Object.fromEntries(
     draftOrders.map((order) => [order.id, order.name])
@@ -947,6 +971,14 @@ export default function Personnalisation() {
           );
         })}
       </s-stack>
+
+      {hasNextPage && (
+        <s-stack direction="inline" justifyContent="center">
+          <s-button variant="secondary" loading={isLoadingMore} onClick={handleLoadMore}>
+            Charger plus de devis
+          </s-button>
+        </s-stack>
+      )}
     </s-page>
   );
 }
