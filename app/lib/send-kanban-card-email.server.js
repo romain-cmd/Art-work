@@ -1,12 +1,35 @@
 import { Resend } from "resend";
+import { applyPlaceholders } from "./email-template.server";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+export const DEFAULT_PARTNER_EMAIL_SUBJECT =
+  "Détails de production — {{orderName}} — {{productTitle}}";
+export const DEFAULT_PARTNER_EMAIL_MESSAGE = "";
 
 // Envoie à un partenaire externe (ex: brodeur, sérigraphe sous-traitant)
 // toutes les informations d'UNE personnalisation : specs, logo et proof
 // approuvée, en pièces jointes (Resend télécharge directement les fichiers
 // depuis leur URL Shopify via le paramètre "path").
-export async function sendKanbanCardEmail({ to, orderName, item }) {
+// subjectTemplate/messageTemplate viennent de ShopSettings (Réglages) et
+// retombent sur le texte par défaut ci-dessus quand ils sont vides.
+export async function sendKanbanCardEmail({
+  to,
+  orderName,
+  item,
+  subjectTemplate,
+  messageTemplate,
+}) {
+  const vars = { orderName, productTitle: item.productTitle };
+  const subject = applyPlaceholders(
+    subjectTemplate || DEFAULT_PARTNER_EMAIL_SUBJECT,
+    vars
+  );
+  const message = applyPlaceholders(
+    messageTemplate || DEFAULT_PARTNER_EMAIL_MESSAGE,
+    vars
+  );
+
   const approvedProof = item.proofs.find((proof) => proof.status === "approuve");
 
   const specRows = [
@@ -39,6 +62,7 @@ export async function sendKanbanCardEmail({ to, orderName, item }) {
     <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
       <h2>Détails de production — ${escapeHtml(orderName)}</h2>
       <h3 style="margin:0 0 8px;">${escapeHtml(item.productTitle)}</h3>
+      ${message ? `<p>${escapeHtml(message)}</p>` : ""}
       ${specRows}
       <p style="margin-top:16px;color:#555;">
         Le logo${approvedProof ? " et la proof approuvée sont" : " est"} en
@@ -55,7 +79,7 @@ export async function sendKanbanCardEmail({ to, orderName, item }) {
   const { error } = await resend.emails.send({
     from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
     to: [to],
-    subject: `Détails de production — ${orderName} — ${item.productTitle}`,
+    subject,
     html,
     attachments: attachments.length > 0 ? attachments : undefined,
   });

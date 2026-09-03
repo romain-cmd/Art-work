@@ -5,6 +5,14 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { colorForType } from "../lib/design-tokens";
+import {
+  DEFAULT_CLIENT_EMAIL_SUBJECT,
+  DEFAULT_CLIENT_EMAIL_MESSAGE,
+} from "../lib/send-proof-email.server";
+import {
+  DEFAULT_PARTNER_EMAIL_SUBJECT,
+  DEFAULT_PARTNER_EMAIL_MESSAGE,
+} from "../lib/send-kanban-card-email.server";
 
 const TYPES = ["Broderie", "Impression", "Gravure", "Sérigraphie"];
 
@@ -45,6 +53,18 @@ const PAGE_STYLES = `
   .rg-partner-field {
     flex: 1;
   }
+  .rg-section-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1a2233;
+    margin: 0;
+  }
+  .rg-card-subtitle code {
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
 `;
 
 export const loader = async ({ request }) => {
@@ -59,6 +79,10 @@ export const loader = async ({ request }) => {
 
   return {
     notificationEmail: settings?.notificationEmail ?? "",
+    clientEmailSubject: settings?.clientEmailSubject ?? "",
+    clientEmailMessage: settings?.clientEmailMessage ?? "",
+    partnerEmailSubject: settings?.partnerEmailSubject ?? "",
+    partnerEmailMessage: settings?.partnerEmailMessage ?? "",
     partnerEmailsByType: Object.fromEntries(
       partnerEmails.map((p) => [p.type, p.email])
     ),
@@ -76,6 +100,30 @@ export const action = async ({ request }) => {
       where: { shop: session.shop },
       update: { notificationEmail },
       create: { shop: session.shop, notificationEmail },
+    });
+    return { success: true };
+  }
+
+  if (intent === "save-email-content") {
+    const clientEmailSubject = formData.get("clientEmailSubject") || null;
+    const clientEmailMessage = formData.get("clientEmailMessage") || null;
+    const partnerEmailSubject = formData.get("partnerEmailSubject") || null;
+    const partnerEmailMessage = formData.get("partnerEmailMessage") || null;
+    await prisma.shopSettings.upsert({
+      where: { shop: session.shop },
+      update: {
+        clientEmailSubject,
+        clientEmailMessage,
+        partnerEmailSubject,
+        partnerEmailMessage,
+      },
+      create: {
+        shop: session.shop,
+        clientEmailSubject,
+        clientEmailMessage,
+        partnerEmailSubject,
+        partnerEmailMessage,
+      },
     });
     return { success: true };
   }
@@ -140,6 +188,86 @@ function NotificationEmailForm({ defaultValue }) {
   );
 }
 
+function EmailContentForm({
+  clientEmailSubject,
+  clientEmailMessage,
+  partnerEmailSubject,
+  partnerEmailMessage,
+}) {
+  const fetcher = useFetcher();
+  const shopify = useAppBridge();
+  const formRef = useRef(null);
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.data?.success) {
+      shopify.toast.show("Contenu des emails enregistré");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.data]);
+
+  const handleSave = () => {
+    const formData = new FormData(formRef.current);
+    fetcher.submit(formData, { method: "post" });
+  };
+
+  return (
+    <div className="rg-card">
+      <p className="rg-card-title">✉️ Contenu des emails</p>
+      <p className="rg-card-subtitle">
+        Personnalise le texte envoyé au client (BAT à valider) et aux
+        partenaires (Suivi de production). Laisse vide pour garder le texte
+        par défaut. Placeholders disponibles :{" "}
+        <code>{"{{orderName}}"}</code> et, pour l&apos;email partenaire,{" "}
+        <code>{"{{productTitle}}"}</code>.
+      </p>
+      <form ref={formRef}>
+        <input type="hidden" name="intent" value="save-email-content" />
+        <s-stack direction="block" gap="large">
+          <s-stack direction="block" gap="small-200">
+            <p className="rg-section-label">Email au client (BAT à valider)</p>
+            <s-text-field
+              name="clientEmailSubject"
+              label="Objet"
+              defaultValue={clientEmailSubject}
+              placeholder={DEFAULT_CLIENT_EMAIL_SUBJECT}
+            ></s-text-field>
+            <s-text-area
+              name="clientEmailMessage"
+              label="Message"
+              defaultValue={clientEmailMessage}
+              placeholder={DEFAULT_CLIENT_EMAIL_MESSAGE}
+              rows="3"
+            ></s-text-area>
+          </s-stack>
+          <s-stack direction="block" gap="small-200">
+            <p className="rg-section-label">Email au partenaire (production)</p>
+            <s-text-field
+              name="partnerEmailSubject"
+              label="Objet"
+              defaultValue={partnerEmailSubject}
+              placeholder={DEFAULT_PARTNER_EMAIL_SUBJECT}
+            ></s-text-field>
+            <s-text-area
+              name="partnerEmailMessage"
+              label="Message (optionnel, ex : consignes pour le partenaire)"
+              defaultValue={partnerEmailMessage}
+              placeholder={
+                DEFAULT_PARTNER_EMAIL_MESSAGE ||
+                "Ex : Merci de traiter cette commande sous 48h."
+              }
+              rows="3"
+            ></s-text-area>
+          </s-stack>
+          <s-button variant="primary" loading={isSubmitting} onClick={handleSave}>
+            Enregistrer
+          </s-button>
+        </s-stack>
+      </form>
+    </div>
+  );
+}
+
 function PartnerEmailsForm({ defaultValues }) {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
@@ -191,12 +319,25 @@ function PartnerEmailsForm({ defaultValues }) {
 }
 
 export default function Reglages() {
-  const { notificationEmail, partnerEmailsByType } = useLoaderData();
+  const {
+    notificationEmail,
+    clientEmailSubject,
+    clientEmailMessage,
+    partnerEmailSubject,
+    partnerEmailMessage,
+    partnerEmailsByType,
+  } = useLoaderData();
 
   return (
     <s-page heading="Réglages">
       <style>{PAGE_STYLES}</style>
       <NotificationEmailForm defaultValue={notificationEmail} />
+      <EmailContentForm
+        clientEmailSubject={clientEmailSubject}
+        clientEmailMessage={clientEmailMessage}
+        partnerEmailSubject={partnerEmailSubject}
+        partnerEmailMessage={partnerEmailMessage}
+      />
       <PartnerEmailsForm defaultValues={partnerEmailsByType} />
     </s-page>
   );

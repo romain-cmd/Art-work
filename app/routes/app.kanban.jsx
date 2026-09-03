@@ -221,8 +221,18 @@ export const action = async ({ request }) => {
       return { success: false, error: "Personnalisation introuvable." };
     }
 
+    const settings = await prisma.shopSettings.findUnique({
+      where: { shop: session.shop },
+    });
+
     try {
-      await sendKanbanCardEmail({ to: partnerEmail, orderName: card.orderName, item });
+      await sendKanbanCardEmail({
+        to: partnerEmail,
+        orderName: card.orderName,
+        item,
+        subjectTemplate: settings?.partnerEmailSubject,
+        messageTemplate: settings?.partnerEmailMessage,
+      });
     } catch (error) {
       return { success: false, error: error.message };
     }

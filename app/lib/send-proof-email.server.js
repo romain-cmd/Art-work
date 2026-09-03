@@ -1,11 +1,36 @@
 import { Resend } from "resend";
+import { applyPlaceholders } from "./email-template.server";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+export const DEFAULT_CLIENT_EMAIL_SUBJECT =
+  "Your designs are ready for review — {{orderName}}";
+export const DEFAULT_CLIENT_EMAIL_MESSAGE =
+  "We've prepared the personalization designs for your order {{orderName}}. Please click the link below to approve each design or request changes.";
 
 // Envoie un seul email au client regroupant tous les proofs en attente
 // d'une commande. Le lien pointe vers la page publique de validation,
 // avec les tokens de chaque proof dans l'URL (voir proof-review.jsx).
-export async function sendProofValidationEmail({ to, orderName, items, reviewUrl }) {
+// subjectTemplate/messageTemplate viennent de ShopSettings (Réglages) et
+// retombent sur le texte par défaut ci-dessus quand ils sont vides.
+export async function sendProofValidationEmail({
+  to,
+  orderName,
+  items,
+  reviewUrl,
+  subjectTemplate,
+  messageTemplate,
+}) {
+  const vars = { orderName };
+  const subject = applyPlaceholders(
+    subjectTemplate || DEFAULT_CLIENT_EMAIL_SUBJECT,
+    vars
+  );
+  const message = applyPlaceholders(
+    messageTemplate || DEFAULT_CLIENT_EMAIL_MESSAGE,
+    vars
+  );
+
   const itemsList = items
     .map((title) => `<li>${escapeHtml(title)}</li>`)
     .join("");
@@ -14,15 +39,8 @@ export async function sendProofValidationEmail({ to, orderName, items, reviewUrl
     <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
       <h2>Your designs are ready for review</h2>
       <p>Hello,</p>
-      <p>
-        We've prepared the personalization designs for your order
-        <strong>${escapeHtml(orderName)}</strong>:
-      </p>
+      <p>${escapeHtml(message)}</p>
       <ul>${itemsList}</ul>
-      <p>
-        Please click the link below to approve each design or request
-        changes.
-      </p>
       <p style="text-align: center; margin: 24px 0;">
         <a
           href="${reviewUrl}"
@@ -37,7 +55,7 @@ export async function sendProofValidationEmail({ to, orderName, items, reviewUrl
   const { error } = await resend.emails.send({
     from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
     to: [to],
-    subject: `Your designs are ready for review — ${orderName}`,
+    subject,
     html,
   });
 

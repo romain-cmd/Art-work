@@ -396,12 +396,18 @@ export const action = async ({ request }) => {
     // eslint-disable-next-line no-undef
     const reviewUrl = `${process.env.SHOPIFY_APP_URL}/proof-review?tokens=${tokens.join(",")}`;
 
+    const settings = await prisma.shopSettings.findUnique({
+      where: { shop: session.shop },
+    });
+
     try {
       await sendProofValidationEmail({
         to: customerEmail,
         orderName,
         items: pendingProofs.map((proof) => proof.personalization.productTitle),
         reviewUrl,
+        subjectTemplate: settings?.clientEmailSubject,
+        messageTemplate: settings?.clientEmailMessage,
       });
     } catch (error) {
       return { success: false, error: error.message };

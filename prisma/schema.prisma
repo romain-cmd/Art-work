@@ -86,10 +86,17 @@ model KanbanCard {
 }
 
 // Réglages généraux de l'app pour une boutique (un seul enregistrement par shop).
+// Les champs *Subject/*Message sont optionnels : quand ils sont vides, les
+// fonctions d'envoi (send-*-email.server.js) retombent sur un texte par
+// défaut. Placeholders supportés : {{orderName}}, {{productTitle}}.
 model ShopSettings {
-  id                String @id @default(cuid())
-  shop              String @unique
-  notificationEmail String?
+  id                   String  @id @default(cuid())
+  shop                 String  @unique
+  notificationEmail    String?
+  clientEmailSubject   String?
+  clientEmailMessage   String?
+  partnerEmailSubject  String?
+  partnerEmailMessage  String?
 }
 
 // Email du partenaire habituel pour un type de personnalisation donné
