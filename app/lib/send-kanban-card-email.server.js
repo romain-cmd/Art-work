@@ -1,11 +1,11 @@
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
+import {
+  DEFAULT_PARTNER_EMAIL_SUBJECT,
+  DEFAULT_PARTNER_EMAIL_MESSAGE,
+} from "./email-defaults";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-export const DEFAULT_PARTNER_EMAIL_SUBJECT =
-  "Détails de production — {{orderName}} — {{productTitle}}";
-export const DEFAULT_PARTNER_EMAIL_MESSAGE = "";
 
 // Envoie à un partenaire externe (ex: brodeur, sérigraphe sous-traitant)
 // toutes les informations d'UNE personnalisation : specs, logo et proof

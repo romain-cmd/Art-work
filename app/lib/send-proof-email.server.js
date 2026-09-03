@@ -1,12 +1,11 @@
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
+import {
+  DEFAULT_CLIENT_EMAIL_SUBJECT,
+  DEFAULT_CLIENT_EMAIL_MESSAGE,
+} from "./email-defaults";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-export const DEFAULT_CLIENT_EMAIL_SUBJECT =
-  "Your designs are ready for review — {{orderName}}";
-export const DEFAULT_CLIENT_EMAIL_MESSAGE =
-  "We've prepared the personalization designs for your order {{orderName}}. Please click the link below to approve each design or request changes.";
 
 // Envoie un seul email au client regroupant tous les proofs en attente
 // d'une commande. Le lien pointe vers la page publique de validation,

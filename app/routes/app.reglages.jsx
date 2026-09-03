@@ -8,11 +8,9 @@ import { colorForType } from "../lib/design-tokens";
 import {
   DEFAULT_CLIENT_EMAIL_SUBJECT,
   DEFAULT_CLIENT_EMAIL_MESSAGE,
-} from "../lib/send-proof-email.server";
-import {
   DEFAULT_PARTNER_EMAIL_SUBJECT,
   DEFAULT_PARTNER_EMAIL_MESSAGE,
-} from "../lib/send-kanban-card-email.server";
+} from "../lib/email-defaults";
 
 const TYPES = ["Broderie", "Impression", "Gravure", "Sérigraphie"];
 
