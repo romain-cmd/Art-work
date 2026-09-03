@@ -82,6 +82,28 @@ const PAGE_STYLES = `
     text-decoration: underline;
     cursor: pointer;
   }
+  .pz-item-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #e8f5e9;
+    color: #2e7d32;
+    white-space: nowrap;
+  }
+  .pz-items-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #fafafa;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .pz-items-summary-text {
+    font-size: 13px;
+    color: #444;
+  }
 `;
 
 // Ordre d'affichage des proofs dans une carte : les modifications
@@ -156,6 +178,7 @@ export const loader = async ({ request }) => {
                     id
                     title
                     quantity
+                    custom
                   }
                 }
               }
@@ -170,7 +193,15 @@ export const loader = async ({ request }) => {
   );
 
   const data = await response.json();
-  const draftOrders = data.data.draftOrders.edges.map((edge) => edge.node);
+  const draftOrders = data.data.draftOrders.edges.map((edge) => {
+    const order = edge.node;
+    return {
+      ...order,
+      lineItems: {
+        edges: order.lineItems.edges.filter(({ node }) => !node.custom),
+      },
+    };
+  });
   const hasNextPage = data.data.draftOrders.pageInfo.hasNextPage;
   const draftOrderIds = draftOrders.map((order) => order.id);
 
@@ -828,6 +859,80 @@ function AttentionBanner({ proofs }) {
   );
 }
 
+function OrderLineItemsList({ order, orderPersonalizations, setSelectedItem }) {
+  const items = order.lineItems.edges;
+  const [isExpanded, setIsExpanded] = useState(items.length <= 3);
+
+  const personalizedCount = items.filter((edge) =>
+    orderPersonalizations.some((p) => p.lineItemId === edge.node.id)
+  ).length;
+
+  if (!isExpanded) {
+    return (
+      <div className="pz-items-summary">
+        <span className="pz-items-summary-text">
+          {items.length} produit{items.length > 1 ? "s" : ""}
+          {personalizedCount > 0
+            ? `, ${personalizedCount} personnalisé${personalizedCount > 1 ? "s" : ""}`
+            : ""}
+        </span>
+        <button type="button" className="pz-link-btn" onClick={() => setIsExpanded(true)}>
+          Voir le détail
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <s-stack direction="block" gap="base">
+      {items.map(({ node: item }) => {
+        const itemPersonalizations = orderPersonalizations.filter(
+          (p) => p.lineItemId === item.id
+        );
+
+        return (
+          <s-stack key={item.id} direction="block" gap="small-200">
+            <s-stack direction="inline" justifyContent="space-between" alignItems="center">
+              <s-stack direction="inline" gap="small-200" alignItems="center">
+                <s-text>
+                  {item.title} — quantité : {item.quantity}
+                </s-text>
+                {itemPersonalizations.length > 0 && (
+                  <span className="pz-item-badge">
+                    ✓ Personnalisé
+                    {itemPersonalizations.length > 1 ? ` (${itemPersonalizations.length})` : ""}
+                  </span>
+                )}
+              </s-stack>
+              <s-button
+                variant="secondary"
+                onClick={() =>
+                  setSelectedItem({
+                    draftOrderId: order.id,
+                    lineItemId: item.id,
+                    productTitle: item.title,
+                    quantity: item.quantity,
+                  })
+                }
+              >
+                Personnaliser
+              </s-button>
+            </s-stack>
+            {itemPersonalizations.map((p) => (
+              <PersonalizationCard key={p.id} personalization={p} />
+            ))}
+          </s-stack>
+        );
+      })}
+      {items.length > 3 && (
+        <button type="button" className="pz-link-btn" onClick={() => setIsExpanded(false)}>
+          Réduire
+        </button>
+      )}
+    </s-stack>
+  );
+}
+
 export default function Personnalisation() {
   const { draftOrders, personalizations, hasNextPage, limit } = useLoaderData();
   const navigate = useNavigate();
@@ -926,39 +1031,11 @@ export default function Personnalisation() {
                   />
                 </s-stack>
 
-                <s-stack direction="block" gap="base">
-                  {order.lineItems.edges.map(({ node: item }) => {
-                    const itemPersonalizations = orderPersonalizations.filter(
-                      (p) => p.lineItemId === item.id
-                    );
-
-                    return (
-                      <s-stack key={item.id} direction="block" gap="small-200">
-                        <s-stack direction="inline" justifyContent="space-between" alignItems="center">
-                          <s-text>
-                            {item.title} — quantité : {item.quantity}
-                          </s-text>
-                          <s-button
-                            variant="secondary"
-                            onClick={() =>
-                              setSelectedItem({
-                                draftOrderId: order.id,
-                                lineItemId: item.id,
-                                productTitle: item.title,
-                                quantity: item.quantity,
-                              })
-                            }
-                          >
-                            Personnaliser
-                          </s-button>
-                        </s-stack>
-                        {itemPersonalizations.map((p) => (
-                          <PersonalizationCard key={p.id} personalization={p} />
-                        ))}
-                      </s-stack>
-                    );
-                  })}
-                </s-stack>
+                <OrderLineItemsList
+                  order={order}
+                  orderPersonalizations={orderPersonalizations}
+                  setSelectedItem={setSelectedItem}
+                />
 
                 {selectedItem?.draftOrderId === order.id && (
                   <PersonalizationForm
