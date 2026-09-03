@@ -1,5 +1,6 @@
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
+import { getFromAddress } from "./email-from.server";
 import {
   DEFAULT_CLIENT_EMAIL_SUBJECT,
   DEFAULT_CLIENT_EMAIL_MESSAGE,
@@ -52,7 +53,7 @@ export async function sendProofValidationEmail({
   `;
 
   const { error } = await resend.emails.send({
-    from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
+    from: getFromAddress(),
     to: [to],
     subject,
     html,
