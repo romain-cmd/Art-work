@@ -171,6 +171,7 @@ export const loader = async ({ request }) => {
             node {
               id
               name
+              email
               createdAt
               lineItems(first: 20) {
                 edges {
@@ -369,6 +370,12 @@ export const action = async ({ request }) => {
   // --- Envoyer un email groupé au client pour tous les proofs en attente d'une commande ---
   if (intent === "send-for-validation") {
     const draftOrderId = formData.get("draftOrderId");
+    const orderName = formData.get("orderName");
+    const customerEmail = formData.get("customerEmail");
+
+    if (!customerEmail) {
+      return { success: false, error: "Indique un email." };
+    }
 
     const pendingProofs = await prisma.proof.findMany({
       where: {
@@ -385,27 +392,6 @@ export const action = async ({ request }) => {
       };
     }
 
-    const orderResponse = await admin.graphql(
-      `#graphql
-        query getDraftOrder($id: ID!) {
-          draftOrder(id: $id) {
-            name
-            email
-          }
-        }`,
-      { variables: { id: draftOrderId } }
-    );
-    const orderJson = await orderResponse.json();
-    const draftOrder = orderJson.data.draftOrder;
-    const customerEmail = draftOrder?.email;
-
-    if (!customerEmail) {
-      return {
-        success: false,
-        error: "Aucun email client trouvé sur ce devis.",
-      };
-    }
-
     const tokens = pendingProofs.map((proof) => proof.token);
     // eslint-disable-next-line no-undef
     const reviewUrl = `${process.env.SHOPIFY_APP_URL}/proof-review?tokens=${tokens.join(",")}`;
@@ -413,7 +399,7 @@ export const action = async ({ request }) => {
     try {
       await sendProofValidationEmail({
         to: customerEmail,
-        orderName: draftOrder.name,
+        orderName,
         items: pendingProofs.map((proof) => proof.personalization.productTitle),
         reviewUrl,
       });
@@ -589,14 +575,17 @@ function AddProofForm({ personalizationId }) {
   );
 }
 
-function SendForValidationButton({ draftOrderId, pendingCount }) {
+function SendForValidationButton({ draftOrderId, orderName, pendingCount, defaultEmail }) {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
+  const formRef = useRef(null);
+  const [isOpen, setIsOpen] = useState(false);
   const isSubmitting = fetcher.state !== "idle";
 
   useEffect(() => {
     if (fetcher.data?.success) {
       shopify.toast.show(`Email envoyé (${fetcher.data.sentCount} proof(s))`);
+      setIsOpen(false);
     } else if (fetcher.data?.error) {
       shopify.toast.show(`Erreur : ${fetcher.data.error}`, { isError: true });
     }
@@ -606,16 +595,41 @@ function SendForValidationButton({ draftOrderId, pendingCount }) {
   if (pendingCount === 0) return null;
 
   const handleSend = () => {
-    const formData = new FormData();
-    formData.set("intent", "send-for-validation");
-    formData.set("draftOrderId", draftOrderId);
+    const formData = new FormData(formRef.current);
     fetcher.submit(formData, { method: "post" });
   };
 
+  if (!isOpen) {
+    return (
+      <s-button variant="primary" onClick={() => setIsOpen(true)}>
+        Envoyer pour validation ({pendingCount})
+      </s-button>
+    );
+  }
+
   return (
-    <s-button variant="primary" loading={isSubmitting} onClick={handleSend}>
-      Envoyer pour validation ({pendingCount})
-    </s-button>
+    <form ref={formRef}>
+      <input type="hidden" name="intent" value="send-for-validation" />
+      <input type="hidden" name="draftOrderId" value={draftOrderId} />
+      <input type="hidden" name="orderName" value={orderName} />
+      <s-stack direction="block" gap="small-200">
+        <s-email-field
+          name="customerEmail"
+          label="Envoyer le BAT à"
+          defaultValue={defaultEmail || ""}
+          placeholder="client@exemple.com"
+          required
+        ></s-email-field>
+        <s-stack direction="inline" gap="small-200">
+          <s-button variant="primary" loading={isSubmitting} onClick={handleSend}>
+            Confirmer l&apos;envoi
+          </s-button>
+          <s-button variant="tertiary" disabled={isSubmitting} onClick={() => setIsOpen(false)}>
+            Annuler
+          </s-button>
+        </s-stack>
+      </s-stack>
+    </form>
   );
 }
 
@@ -1168,7 +1182,9 @@ export default function Personnalisation() {
                   </s-stack>
                   <SendForValidationButton
                     draftOrderId={order.id}
+                    orderName={order.name}
                     pendingCount={pendingCount}
+                    defaultEmail={order.email}
                   />
                 </s-stack>
 
