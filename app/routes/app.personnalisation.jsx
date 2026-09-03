@@ -282,6 +282,32 @@ export const action = async ({ request }) => {
     return { success: true };
   }
 
+  // --- Modifier les caractéristiques d'une personnalisation existante ---
+  if (intent === "update-personalization") {
+    const personalizationId = formData.get("personalizationId");
+
+    const personalization = await prisma.personalization.findUnique({
+      where: { id: personalizationId },
+    });
+    if (!personalization || personalization.shop !== session.shop) {
+      return { success: false, error: "Personnalisation introuvable." };
+    }
+
+    const type = formData.get("type");
+    const quantity = Number(formData.get("quantity"));
+    const size = formData.get("size") || null;
+    const color = formData.get("color") || null;
+    const location = formData.get("location") || null;
+    const customText = formData.get("customText") || null;
+
+    await prisma.personalization.update({
+      where: { id: personalizationId },
+      data: { type, quantity, size, color, location, customText },
+    });
+
+    return { success: true };
+  }
+
   // --- Approuver manuellement une proof (client validé par un autre canal) ---
   if (intent === "manual-approve") {
     const proofId = formData.get("proofId");
@@ -752,6 +778,120 @@ function EditLogoForm({ personalizationId, hasLogo }) {
   );
 }
 
+function EditPersonalizationForm({ personalization }) {
+  const fetcher = useFetcher();
+  const shopify = useAppBridge();
+  const formRef = useRef(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.data?.success) {
+      shopify.toast.show("Personnalisation mise à jour");
+      setIsOpen(false);
+    } else if (fetcher.data?.error) {
+      shopify.toast.show(`Erreur : ${fetcher.data.error}`, { isError: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.data]);
+
+  const handleSave = () => {
+    const formData = new FormData(formRef.current);
+    fetcher.submit(formData, { method: "post" });
+  };
+
+  if (!isOpen) {
+    return (
+      <button type="button" className="pz-link-btn" onClick={() => setIsOpen(true)}>
+        Modifier
+      </button>
+    );
+  }
+
+  return (
+    <form ref={formRef}>
+      <input type="hidden" name="intent" value="update-personalization" />
+      <input type="hidden" name="personalizationId" value={personalization.id} />
+      <s-stack direction="block" gap="small-200">
+        <s-select name="type" label="Type" required>
+          <s-option value="Broderie" selected={personalization.type === "Broderie"}>
+            Broderie
+          </s-option>
+          <s-option value="Impression" selected={personalization.type === "Impression"}>
+            Impression
+          </s-option>
+          <s-option value="Gravure" selected={personalization.type === "Gravure"}>
+            Gravure
+          </s-option>
+          <s-option value="Sérigraphie" selected={personalization.type === "Sérigraphie"}>
+            Sérigraphie
+          </s-option>
+        </s-select>
+
+        <s-number-field
+          name="quantity"
+          label="Quantité"
+          min="1"
+          value={String(personalization.quantity)}
+          required
+        ></s-number-field>
+
+        <s-text-field
+          name="size"
+          label="Taille"
+          defaultValue={personalization.size || ""}
+        ></s-text-field>
+
+        <s-text-field
+          name="color"
+          label="Couleur"
+          defaultValue={personalization.color || ""}
+        ></s-text-field>
+
+        <s-select name="location" label="Emplacement">
+          <s-option
+            value="Poitrine gauche"
+            selected={personalization.location === "Poitrine gauche"}
+          >
+            Poitrine gauche
+          </s-option>
+          <s-option
+            value="Poitrine droite"
+            selected={personalization.location === "Poitrine droite"}
+          >
+            Poitrine droite
+          </s-option>
+          <s-option value="Manche" selected={personalization.location === "Manche"}>
+            Manche
+          </s-option>
+          <s-option value="Dos" selected={personalization.location === "Dos"}>
+            Dos
+          </s-option>
+          <s-option value="Autre" selected={personalization.location === "Autre"}>
+            Autre
+          </s-option>
+        </s-select>
+
+        <s-text-area
+          name="customText"
+          label="Texte personnalisé"
+          rows="2"
+          defaultValue={personalization.customText || ""}
+        ></s-text-area>
+
+        <s-stack direction="inline" gap="small-200">
+          <s-button variant="primary" loading={isSubmitting} onClick={handleSave}>
+            Enregistrer
+          </s-button>
+          <s-button variant="tertiary" disabled={isSubmitting} onClick={() => setIsOpen(false)}>
+            Annuler
+          </s-button>
+        </s-stack>
+      </s-stack>
+    </form>
+  );
+}
+
 function PersonalizationCard({ personalization }) {
   return (
     <s-box padding="base small-200" borderWidth="small" borderRadius="base">
@@ -762,6 +902,7 @@ function PersonalizationCard({ personalization }) {
           {personalization.color ? ` — couleur ${personalization.color}` : ""}
           {personalization.location ? ` — ${personalization.location}` : ""}
         </s-text>
+        <EditPersonalizationForm personalization={personalization} />
 
         {personalization.logoUrl && (
           <s-thumbnail src={personalization.logoUrl} alt="Logo" size="small"></s-thumbnail>
