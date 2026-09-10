@@ -1100,25 +1100,17 @@ function AttentionBanner({ proofs }) {
 function OrderLineItemsList({ order, orderPersonalizations, setSelectedItem }) {
   const items = order.lineItems.edges;
 
-  // Une correction ne doit jamais rester cachée derrière "Voir le détail" :
-  // dès qu'un article en a besoin, la liste s'ouvre automatiquement.
-  const hasItemNeedingCorrection = items.some(({ node: item }) => {
-    const itemPersonalizations = orderPersonalizations.filter(
-      (p) => p.lineItemId === item.id
-    );
-    return (
-      itemPersonalizations.length > 0 &&
-      getOrderStatus(itemPersonalizations) === "a_corriger"
-    );
-  });
-
-  const [isExpanded, setIsExpanded] = useState(
-    items.length <= 3 || hasItemNeedingCorrection
-  );
-
   const personalizedCount = items.filter((edge) =>
     orderPersonalizations.some((p) => p.lineItemId === edge.node.id)
   ).length;
+
+  // Le détail par article (statut par ligne) ne doit jamais rester caché
+  // derrière "Voir le détail" quand il y a matière à comparer : dès qu'une
+  // commande a plus d'un produit personnalisé, on affiche tout de suite
+  // qui est validé et qui ne l'est pas, sans clic supplémentaire.
+  const [isExpanded, setIsExpanded] = useState(
+    items.length <= 3 || personalizedCount > 1
+  );
 
   if (!isExpanded) {
     return (
