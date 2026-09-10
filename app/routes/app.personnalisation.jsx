@@ -20,6 +20,22 @@ const PROOF_ACCENT = {
   modification_demandee: "#DC2626",
 };
 
+const PROOF_BG = {
+  en_attente: "#FEF6EC",
+  approuve: "#EAF7F0",
+  modification_demandee: "#FDECEC",
+};
+
+// Même échelle de statut que getOrderStatus, mais utilisée au niveau d'un
+// seul article : permet d'identifier en un coup d'œil, sans dépiler quoi
+// que ce soit, quel article est validé ou nécessite une correction.
+const ITEM_STATUS_META = {
+  a_corriger: { label: "À corriger", tone: "critical", icon: "⚠️" },
+  a_envoyer: { label: "À envoyer", tone: "info", icon: "📤" },
+  en_attente_reponse: { label: "En attente de réponse", tone: "neutral", icon: "⏳" },
+  valide: { label: "Validé", tone: "success", icon: "✅" },
+};
+
 // Styles injectés localement : les composants Polaris (s-box, s-section)
 // rendent dans un Shadow DOM inaccessible depuis l'extérieur, donc les
 // cartes ci-dessous sont des divs classiques pour permettre les accents
@@ -54,8 +70,8 @@ const PAGE_STYLES = `
   .pz-order-card {
     background: #ffffff;
     border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
+    padding: 24px;
+    margin-bottom: 20px;
     box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
     border-left: 5px solid var(--pz-accent, #cbd5e1);
   }
@@ -69,8 +85,57 @@ const PAGE_STYLES = `
     border: 1px solid #e4e7ec;
     border-left: 4px solid var(--pz-proof-accent, #cbd5e1);
     border-radius: 8px;
-    padding: 10px;
-    width: 160px;
+    padding: 12px;
+    width: 180px;
+  }
+  .pz-item-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .pz-item-status--a_corriger {
+    background: #fdecec;
+    color: #b42318;
+  }
+  .pz-item-status--a_envoyer {
+    background: #eaf2fe;
+    color: #1849a9;
+  }
+  .pz-item-status--en_attente_reponse {
+    background: #f1f2f4;
+    color: #4a5468;
+  }
+  .pz-item-status--valide {
+    background: #eaf7f0;
+    color: #1a7f4e;
+  }
+  .pz-actions-toggle {
+    appearance: none;
+    background: #f1f2f4;
+    border: none;
+    border-radius: 6px;
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    color: #4a5468;
+  }
+  .pz-actions-toggle:hover {
+    background: #e4e7ec;
+  }
+  .pz-item-row {
+    padding: 10px 0;
+    border-top: 1px solid #f0f1f3;
+  }
+  .pz-item-row:first-child {
+    border-top: none;
+    padding-top: 0;
   }
   .pz-link-btn {
     appearance: none;
@@ -81,16 +146,6 @@ const PAGE_STYLES = `
     color: #0b2545;
     text-decoration: underline;
     cursor: pointer;
-  }
-  .pz-item-badge {
-    display: inline-block;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: #e8f5e9;
-    color: #2e7d32;
-    white-space: nowrap;
   }
   .pz-items-summary {
     display: flex;
@@ -124,13 +179,17 @@ function sortProofsByStatus(proofs) {
 // commande dans la catégorie la plus urgente parmi ses personnalisations,
 // pour qu'une tâche pressante ne se cache jamais dans un onglet "calme".
 const STATUS_FILTERS = [
-  { key: "a_personnaliser", label: "À personnaliser" },
-  { key: "a_envoyer", label: "À envoyer" },
-  { key: "en_attente_reponse", label: "En attente de réponse" },
-  { key: "a_corriger", label: "À corriger" },
-  { key: "valide", label: "Validé" },
+  { key: "a_personnaliser", label: "À personnaliser", icon: "📝" },
+  { key: "a_envoyer", label: "À envoyer", icon: "📤" },
+  { key: "en_attente_reponse", label: "En attente de réponse", icon: "⏳" },
+  { key: "a_corriger", label: "À corriger", icon: "⚠️" },
+  { key: "valide", label: "Validé", icon: "✅" },
 ];
 
+// Calcule le statut le plus urgent d'un ensemble de personnalisations.
+// Utilisée à deux échelles : pour toute une commande (filtre du haut) et
+// pour un seul article (badge par ligne) — la logique est identique, seul
+// l'ensemble de personnalisations passé en entrée change.
 function getOrderStatus(orderPersonalizations) {
   if (orderPersonalizations.length === 0) return "a_personnaliser";
 
@@ -724,11 +783,12 @@ function ProofThumbnail({ proof }) {
   const needsAttention = proof.status === "modification_demandee";
   const isPdf = proof.mimeType === "application/pdf";
   const accent = PROOF_ACCENT[proof.status] ?? PROOF_ACCENT.en_attente;
+  const bg = PROOF_BG[proof.status] ?? PROOF_BG.en_attente;
   return (
     <div
       id={`proof-${proof.id}`}
       className="pz-proof-card"
-      style={{ "--pz-proof-accent": accent }}
+      style={{ "--pz-proof-accent": accent, background: bg }}
     >
       <s-stack direction="block" gap="small-200">
         {isPdf ? (
@@ -913,24 +973,41 @@ function EditPersonalizationForm({ personalization }) {
 }
 
 function PersonalizationCard({ personalization }) {
+  const [showActions, setShowActions] = useState(false);
+
   return (
     <s-box padding="base small-200" borderWidth="small" borderRadius="base">
       <s-stack direction="block" gap="small-200">
-        <s-text>
-          {personalization.type} — quantité {personalization.quantity}
-          {personalization.size ? ` — taille ${personalization.size}` : ""}
-          {personalization.color ? ` — couleur ${personalization.color}` : ""}
-          {personalization.location ? ` — ${personalization.location}` : ""}
-        </s-text>
-        <EditPersonalizationForm personalization={personalization} />
+        <s-stack direction="inline" justifyContent="space-between" alignItems="center">
+          <s-text>
+            {personalization.type} — quantité {personalization.quantity}
+            {personalization.size ? ` — taille ${personalization.size}` : ""}
+            {personalization.color ? ` — couleur ${personalization.color}` : ""}
+            {personalization.location ? ` — ${personalization.location}` : ""}
+          </s-text>
+          <button
+            type="button"
+            className="pz-actions-toggle"
+            title="Modifier"
+            onClick={() => setShowActions((v) => !v)}
+          >
+            ⋯
+          </button>
+        </s-stack>
+
+        {showActions && (
+          <s-stack direction="inline" gap="base" alignItems="center">
+            <EditPersonalizationForm personalization={personalization} />
+            <EditLogoForm
+              personalizationId={personalization.id}
+              hasLogo={Boolean(personalization.logoUrl)}
+            />
+          </s-stack>
+        )}
 
         {personalization.logoUrl && (
           <s-thumbnail src={personalization.logoUrl} alt="Logo" size="small"></s-thumbnail>
         )}
-        <EditLogoForm
-          personalizationId={personalization.id}
-          hasLogo={Boolean(personalization.logoUrl)}
-        />
 
         <s-stack direction="inline" gap="small-200">
           {sortProofsByStatus(personalization.proofs).map((proof) => (
@@ -1022,7 +1099,22 @@ function AttentionBanner({ proofs }) {
 
 function OrderLineItemsList({ order, orderPersonalizations, setSelectedItem }) {
   const items = order.lineItems.edges;
-  const [isExpanded, setIsExpanded] = useState(items.length <= 3);
+
+  // Une correction ne doit jamais rester cachée derrière "Voir le détail" :
+  // dès qu'un article en a besoin, la liste s'ouvre automatiquement.
+  const hasItemNeedingCorrection = items.some(({ node: item }) => {
+    const itemPersonalizations = orderPersonalizations.filter(
+      (p) => p.lineItemId === item.id
+    );
+    return (
+      itemPersonalizations.length > 0 &&
+      getOrderStatus(itemPersonalizations) === "a_corriger"
+    );
+  });
+
+  const [isExpanded, setIsExpanded] = useState(
+    items.length <= 3 || hasItemNeedingCorrection
+  );
 
   const personalizedCount = items.filter((edge) =>
     orderPersonalizations.some((p) => p.lineItemId === edge.node.id)
@@ -1045,44 +1137,49 @@ function OrderLineItemsList({ order, orderPersonalizations, setSelectedItem }) {
   }
 
   return (
-    <s-stack direction="block" gap="base">
+    <s-stack direction="block" gap="small-200">
       {items.map(({ node: item }) => {
         const itemPersonalizations = orderPersonalizations.filter(
           (p) => p.lineItemId === item.id
         );
+        const itemStatus =
+          itemPersonalizations.length > 0 ? getOrderStatus(itemPersonalizations) : null;
+        const statusMeta = itemStatus ? ITEM_STATUS_META[itemStatus] : null;
 
         return (
-          <s-stack key={item.id} direction="block" gap="small-200">
-            <s-stack direction="inline" justifyContent="space-between" alignItems="center">
-              <s-stack direction="inline" gap="small-200" alignItems="center">
-                <s-text>
-                  {item.title} — quantité : {item.quantity}
-                </s-text>
-                {itemPersonalizations.length > 0 && (
-                  <span className="pz-item-badge">
-                    ✓ Personnalisé
-                    {itemPersonalizations.length > 1 ? ` (${itemPersonalizations.length})` : ""}
-                  </span>
-                )}
+          <div key={item.id} className="pz-item-row">
+            <s-stack direction="block" gap="small-200">
+              <s-stack direction="inline" justifyContent="space-between" alignItems="center">
+                <s-stack direction="inline" gap="small-200" alignItems="center">
+                  <s-text>
+                    {item.title} — quantité : {item.quantity}
+                  </s-text>
+                  {statusMeta && (
+                    <span className={`pz-item-status pz-item-status--${itemStatus}`}>
+                      {statusMeta.icon} {statusMeta.label}
+                      {itemPersonalizations.length > 1 ? ` (${itemPersonalizations.length})` : ""}
+                    </span>
+                  )}
+                </s-stack>
+                <s-button
+                  variant="secondary"
+                  onClick={() =>
+                    setSelectedItem({
+                      draftOrderId: order.id,
+                      lineItemId: item.id,
+                      productTitle: item.title,
+                      quantity: item.quantity,
+                    })
+                  }
+                >
+                  Personnaliser
+                </s-button>
               </s-stack>
-              <s-button
-                variant="secondary"
-                onClick={() =>
-                  setSelectedItem({
-                    draftOrderId: order.id,
-                    lineItemId: item.id,
-                    productTitle: item.title,
-                    quantity: item.quantity,
-                  })
-                }
-              >
-                Personnaliser
-              </s-button>
+              {itemPersonalizations.map((p) => (
+                <PersonalizationCard key={p.id} personalization={p} />
+              ))}
             </s-stack>
-            {itemPersonalizations.map((p) => (
-              <PersonalizationCard key={p.id} personalization={p} />
-            ))}
-          </s-stack>
+          </div>
         );
       })}
       {items.length > 3 && (
@@ -1165,7 +1262,7 @@ export default function Personnalisation() {
                 className={`pz-filter-pill${statusFilter === filter.key ? " pz-filter-pill--active" : ""}`}
                 onClick={() => setStatusFilter(filter.key)}
               >
-                {filter.label} ({count})
+                {filter.icon} {filter.label} ({count})
               </button>
             );
           })}
