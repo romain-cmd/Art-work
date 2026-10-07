@@ -48,6 +48,9 @@ model Personalization {
   location        String?
   customText      String?
   logoUrl         String?
+  logoMimeType    String?
+  logoFileName    String?
+  dimensions      String?
   createdAt       DateTime @default(now())
   proofs          Proof[]
 }
@@ -60,6 +63,12 @@ model Proof {
   personalization   Personalization @relation(fields: [personalizationId], references: [id])
   imageUrl          String
   mimeType          String?
+  fileName          String?
+  version           Int       @default(1)
+  isCurrent         Boolean   @default(true)
+  supersedesId      String?
+  snapshot          Json?
+  approvedVia       String?
   status            String    @default("en_attente")
   commentaireClient String?
   token             String    @unique @default(cuid())
@@ -82,6 +91,9 @@ model KanbanCard {
   orderName         String
   personalizationId String    @unique
   status            String    @default("a_faire")
+  archivedAt        DateTime?
+  lastSentAt        DateTime?
+  lastSentTo        String?
   startDate         DateTime?
   endDate           DateTime?
   createdAt         DateTime  @default(now())
@@ -95,6 +107,7 @@ model KanbanCard {
 model ShopSettings {
   id                   String  @id @default(cuid())
   shop                 String  @unique
+  artworkIndexedAt     DateTime?
   notificationEmail    String?
   clientEmailSubject   String?
   clientEmailMessage   String?
@@ -112,4 +125,51 @@ model PartnerEmail {
   email String
 
   @@unique([shop, type])
+}
+
+model ArtworkCase {
+  id              String @id @default(cuid())
+  shop            String
+  draftOrderId    String
+  name            String
+  email           String?
+  customerName    String?
+  yachtName       String?
+  shopifyStatus   String @default("OPEN")
+  orderId         String?
+  orderName       String?
+  shopifyCreatedAt DateTime?
+  shopifyUpdatedAt DateTime?
+  syncedAt        DateTime?
+  archivedAt      DateTime?
+  createdAt       DateTime @default(now())
+  events          ArtworkEvent[]
+  @@unique([shop, draftOrderId])
+  @@index([shop, archivedAt, shopifyUpdatedAt])
+}
+
+model ArtworkItem {
+  id           String @id @default(cuid())
+  shop         String
+  draftOrderId String
+  lineItemId   String
+  variantId    String?
+  title        String
+  variantTitle String?
+  sku          String?
+  quantity     Int
+  requirement  String @default("pending")
+  isActive     Boolean @default(true)
+  @@unique([shop, draftOrderId, lineItemId])
+  @@index([shop, draftOrderId, isActive])
+}
+
+model ArtworkEvent {
+  id         String @id @default(cuid())
+  caseId     String
+  dossier    ArtworkCase @relation(fields: [caseId], references: [id])
+  message    String
+  actor      String @default("Équipe")
+  createdAt  DateTime @default(now())
+  @@index([caseId, createdAt])
 }

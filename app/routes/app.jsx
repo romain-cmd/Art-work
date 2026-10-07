@@ -16,7 +16,7 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app/personnalisation">Personnalisation</s-link>
+        <s-link href="/app/personnalisation">Dossiers artwork</s-link>
         <s-link href="/app/kanban">Suivi de production</s-link>
         <s-link href="/app/reglages">Réglages</s-link>
       </s-app-nav>

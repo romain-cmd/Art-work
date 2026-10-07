@@ -1,3 +1,4 @@
+import { currentProofs, fileExtension, isPersonalizationApproved } from "./artwork-status";
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
 import { getFromAddress } from "./email-from.server";
@@ -31,13 +32,16 @@ export async function sendKanbanCardEmail({
     vars
   );
 
-  const approvedProof = item.proofs.find((proof) => proof.status === "approuve");
+  if (!isPersonalizationApproved(item)) throw new Error("Les BAT actuels doivent tous être validés avant transmission.");
+  const approvedProofs = currentProofs(item);
+  const approvedProof = approvedProofs[0];
 
   const specRows = [
     ["Type", item.type],
     ["Quantité", item.quantity],
-    ["Taille", item.size],
-    ["Couleur", item.color],
+    ["Dimensions du marquage", item.dimensions],
+    ["Ancienne information taille", item.size],
+    ["Couleur du marquage", item.color],
     ["Emplacement", item.location],
     ["Texte personnalisé", item.customText],
   ]
@@ -50,13 +54,10 @@ export async function sendKanbanCardEmail({
 
   const attachments = [];
   if (item.logoUrl) {
-    attachments.push({ filename: `logo-${item.productTitle}.png`, path: item.logoUrl });
+    attachments.push({ filename: item.logoFileName || `logo-${item.productTitle}${fileExtension(item.logoMimeType, item.logoUrl)}`, path: item.logoUrl });
   }
-  if (approvedProof) {
-    attachments.push({
-      filename: `proof-${item.productTitle}.png`,
-      path: approvedProof.imageUrl,
-    });
+  for (const proof of approvedProofs) {
+    attachments.push({ filename: proof.fileName || `BAT-${item.productTitle}-V${proof.version}${fileExtension(proof.mimeType, proof.imageUrl)}`, path: proof.imageUrl });
   }
 
   const html = `
@@ -66,12 +67,12 @@ export async function sendKanbanCardEmail({
       ${message ? `<p>${escapeHtml(message)}</p>` : ""}
       ${specRows}
       <p style="margin-top:16px;color:#555;">
-        Le logo${approvedProof ? " et la proof approuvée sont" : " est"} en
+        Le logo${approvedProof ? " et la BAT validé sont" : " est"} en
         pièce jointe de cet email.
       </p>
       ${
         !approvedProof
-          ? '<p style="color:#c62828;">Aucune proof approuvée pour le moment.</p>'
+          ? '<p style="color:#c62828;">Aucune BAT validé pour le moment.</p>'
           : ""
       }
     </div>

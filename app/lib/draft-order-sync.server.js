@@ -56,13 +56,13 @@ export const DRAFT_LINE_ITEMS_QUERY = `#graphql
     draftOrder(id: $id) {
       id
       lineItems(first: 250, after: $after) {
-        edges { node { id title quantity custom variant { id } } }
+        edges { node { id title quantity custom variant { id title sku } } }
         pageInfo { hasNextPage endCursor }
       }
     }
   }`;
 
-export async function fetchDraftLineItems(admin, draftOrderId, connection) {
+export async function fetchDraftLineItems(admin, draftOrderId, connection, { includeCustom = false } = {}) {
   const edges = connection ? [...connection.edges] : [];
   let pageInfo = connection?.pageInfo ?? { hasNextPage: true, endCursor: null };
   while (pageInfo.hasNextPage) {
@@ -77,7 +77,7 @@ export async function fetchDraftLineItems(admin, draftOrderId, connection) {
     edges.push(...next.edges);
     pageInfo = next.pageInfo;
   }
-  return edges.filter(({ node }) => !node.custom);
+  return includeCustom ? edges : edges.filter(({ node }) => !node.custom);
 }
 
 export async function syncDraftPersonalizations(db, shop, draftOrderId, items) {

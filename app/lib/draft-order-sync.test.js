@@ -96,3 +96,8 @@ test("database reconciliation scopes records to the shop and draft and updates t
   assert.equal(calls[1].where.id, "p1");
   assert.equal(calls[1].data.lineItemId, "new");
 });
+
+ test("artwork qualification can explicitly include custom lines without treating them as products by default", async () => {
+  const admin = { graphql: async () => ({ json: async () => ({ data: { draftOrder: { lineItems: { edges: [{ node: { id: "custom-product", custom: true } }], pageInfo: { hasNextPage: false, endCursor: null } } } } }) }) };
+  assert.deepEqual((await fetchDraftLineItems(admin, "draft", undefined, { includeCustom: true })).map((e) => e.node.id), ["custom-product"]);
+ });

@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types -- no PropTypes package in this project */
 import { useEffect, useRef } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+import { useBlocker, useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -94,6 +94,7 @@ export const action = async ({ request }) => {
 
   if (intent === "save-notification-email") {
     const notificationEmail = formData.get("notificationEmail") || null;
+    if (notificationEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(notificationEmail))) return { success: false, error: "Email de notification invalide." };
     await prisma.shopSettings.upsert({
       where: { shop: session.shop },
       update: { notificationEmail },
@@ -127,16 +128,12 @@ export const action = async ({ request }) => {
   }
 
   if (intent === "save-partner-emails") {
-    for (const type of TYPES) {
-      const email = formData.get(`partnerEmail_${type}`);
-      if (email) {
-        await prisma.partnerEmail.upsert({
-          where: { shop_type: { shop: session.shop, type } },
-          update: { email },
-          create: { shop: session.shop, type, email },
-        });
-      }
-    }
+    const emails = TYPES.map((type) => ({ type, email: String(formData.get(`partnerEmail_${type}`) || "").trim() }));
+    if (emails.some(({ email }) => email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return { success: false, error: "Email partenaire invalide. Vérifie les adresses avant d’enregistrer." };
+    await prisma.$transaction(emails.map(({ type, email }) => email
+      ? prisma.partnerEmail.upsert({ where: { shop_type: { shop: session.shop, type } }, update: { email }, create: { shop: session.shop, type, email } })
+      : prisma.partnerEmail.deleteMany({ where: { shop: session.shop, type } })
+    ));
     return { success: true };
   }
 
@@ -151,8 +148,10 @@ function NotificationEmailForm({ defaultValue }) {
 
   useEffect(() => {
     if (fetcher.data?.success) {
+      if (formRef.current) delete formRef.current.dataset.settingsDirty;
       shopify.toast.show("Email de notification enregistré");
     }
+    if (fetcher.data?.error) shopify.toast.show(fetcher.data.error, { isError: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data]);
 
@@ -168,7 +167,7 @@ function NotificationEmailForm({ defaultValue }) {
         Reçoit un email dès qu&apos;un client approuve une maquette ou demande
         une modification.
       </p>
-      <form ref={formRef}>
+      <form ref={formRef} onChange={() => { formRef.current.dataset.settingsDirty = "true"; }} onInput={() => { formRef.current.dataset.settingsDirty = "true"; }}>
         <input type="hidden" name="intent" value="save-notification-email" />
         <s-stack direction="block" gap="base">
           <s-email-field
@@ -181,6 +180,7 @@ function NotificationEmailForm({ defaultValue }) {
             Enregistrer
           </s-button>
         </s-stack>
+        {fetcher.data?.error && <p role="alert" style={{ color: "#b42318" }}>{fetcher.data.error}</p>}
       </form>
     </div>
   );
@@ -199,8 +199,10 @@ function EmailContentForm({
 
   useEffect(() => {
     if (fetcher.data?.success) {
+      if (formRef.current) delete formRef.current.dataset.settingsDirty;
       shopify.toast.show("Contenu des emails enregistré");
     }
+    if (fetcher.data?.error) shopify.toast.show(fetcher.data.error, { isError: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data]);
 
@@ -215,11 +217,11 @@ function EmailContentForm({
       <p className="rg-card-subtitle">
         Personnalise le texte envoyé au client (BAT à valider) et aux
         partenaires (Suivi de production). Laisse vide pour garder le texte
-        par défaut. Placeholders disponibles :{" "}
+        par défaut. Variables disponibles :{" "}
         <code>{"{{orderName}}"}</code> et, pour l&apos;email partenaire,{" "}
         <code>{"{{productTitle}}"}</code>.
       </p>
-      <form ref={formRef}>
+      <form ref={formRef} onChange={() => { formRef.current.dataset.settingsDirty = "true"; }} onInput={() => { formRef.current.dataset.settingsDirty = "true"; }}>
         <input type="hidden" name="intent" value="save-email-content" />
         <s-stack direction="block" gap="large">
           <s-stack direction="block" gap="small-200">
@@ -261,6 +263,7 @@ function EmailContentForm({
             Enregistrer
           </s-button>
         </s-stack>
+        {fetcher.data?.error && <p role="alert" style={{ color: "#b42318" }}>{fetcher.data.error}</p>}
       </form>
     </div>
   );
@@ -274,8 +277,10 @@ function PartnerEmailsForm({ defaultValues }) {
 
   useEffect(() => {
     if (fetcher.data?.success) {
+      if (formRef.current) delete formRef.current.dataset.settingsDirty;
       shopify.toast.show("Emails partenaires enregistrés");
     }
+    if (fetcher.data?.error) shopify.toast.show(fetcher.data.error, { isError: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data]);
 
@@ -289,9 +294,9 @@ function PartnerEmailsForm({ defaultValues }) {
       <p className="rg-card-title">🤝 Partenaires par type de personnalisation</p>
       <p className="rg-card-subtitle">
         Pré-rempli automatiquement le champ email sur les cartes de Suivi de
-        production de ce type. Mis à jour automatiquement à chaque envoi.
+        production de ce type. Modifié uniquement si tu choisis « Utiliser comme partenaire par défaut ». Laisse le champ vide pour supprimer ce partenaire.
       </p>
-      <form ref={formRef}>
+      <form ref={formRef} onChange={() => { formRef.current.dataset.settingsDirty = "true"; }} onInput={() => { formRef.current.dataset.settingsDirty = "true"; }}>
         <input type="hidden" name="intent" value="save-partner-emails" />
         <s-stack direction="block" gap="base">
           {TYPES.map((type) => (
@@ -311,12 +316,24 @@ function PartnerEmailsForm({ defaultValues }) {
             Enregistrer
           </s-button>
         </s-stack>
+        {fetcher.data?.error && <p role="alert" style={{ color: "#b42318" }}>{fetcher.data.error}</p>}
       </form>
     </div>
   );
 }
 
 export default function Reglages() {
+  const blocker = useBlocker(() => Boolean(document.querySelector('[data-settings-dirty="true"]')));
+  useEffect(() => {
+    if (blocker.state === "blocked") {
+      if (window.confirm("Quitter les réglages sans enregistrer les modifications ?")) blocker.proceed();
+      else blocker.reset();
+    }
+  }, [blocker]);
+  useEffect(() => {
+    const before = (e) => { if (document.querySelector('[data-settings-dirty="true"]')) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", before); return () => window.removeEventListener("beforeunload", before);
+  }, []);
   const {
     notificationEmail,
     clientEmailSubject,

@@ -1,652 +1,133 @@
-/* eslint-disable react/prop-types -- no PropTypes package in this project */
-import { useEffect, useRef, useState } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+/* eslint-disable react/prop-types */
+import { useEffect, useState } from "react";
+import { Link, useBlocker, useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { sendKanbanCardEmail } from "../lib/send-kanban-card-email.server";
-import { colorForType } from "../lib/design-tokens";
-
-const COLUMNS = [
-  { key: "a_faire", label: "À faire", tint: "#f1f2f4" },
-  { key: "en_cours", label: "En cours", tint: "#eff6ff" },
-  { key: "termine", label: "Terminé", tint: "#ecfdf5" },
-];
-
+import { currentProofs, fileExtension, isPersonalizationApproved, summarizeCase } from "../lib/artwork-status";
+import { event, metadata, readDossier, reconcileCase } from "../lib/artwork-cases.server";
+import { WORKSPACE_STYLES } from "../lib/workspace-styles";
+const COLUMNS = [{ key: "a_faire", label: "À faire" }, { key: "en_cours", label: "En cours" }, { key: "termine", label: "Terminé" }];
 const TYPES = ["Broderie", "Impression", "Gravure", "Sérigraphie"];
-
-// Styles injectés localement : les composants Polaris (s-box, s-section)
-// rendent dans un Shadow DOM qu'on ne peut pas re-styler depuis
-// l'extérieur, donc les éléments "board"/"carte" ci-dessous sont des
-// divs classiques pour permettre couleurs, ombres et survols.
-const KANBAN_STYLES = `
-  .kb-board {
-    display: flex;
-    gap: 20px;
-    align-items: flex-start;
-    overflow-x: auto;
-    padding-bottom: 8px;
-  }
-  .kb-column {
-    border-radius: 12px;
-    padding: 12px;
-    min-width: 280px;
-    flex: 1;
-  }
-  .kb-column-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 2px 4px 12px;
-  }
-  .kb-column-title {
-    font-weight: 700;
-    font-size: 14px;
-    color: #1a2233;
-  }
-  .kb-column-count {
-    background: #ffffff;
-    border-radius: 999px;
-    padding: 2px 9px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #64748b;
-  }
-  .kb-column-empty {
-    font-size: 13px;
-    color: #94a3b8;
-    padding: 4px;
-  }
-  .kb-card {
-    background: #ffffff;
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 10px;
-    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-    border-left: 4px solid var(--kb-accent, #cbd5e1);
-    transition: box-shadow 0.15s ease, transform 0.15s ease;
-  }
-  .kb-card:hover {
-    box-shadow: 0 6px 16px rgba(16, 24, 40, 0.12);
-    transform: translateY(-1px);
-  }
-  .kb-chip {
-    display: inline-block;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 2px 9px;
-    border-radius: 999px;
-    color: #ffffff;
-    margin-bottom: 8px;
-  }
-  .kb-card-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #1a2233;
-    margin: 0 0 2px;
-  }
-  .kb-card-order {
-    font-size: 12px;
-    color: #94a3b8;
-    margin: 0 0 10px;
-  }
-  .kb-filter-row {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 20px;
-  }
-  .kb-filter-pill {
-    appearance: none;
-    cursor: pointer;
-    border: 1px solid #cbd5e1;
-    background: #ffffff;
-    color: #1a2233;
-    border-radius: 999px;
-    padding: 6px 14px;
-    font-size: 13px;
-    font-weight: 600;
-    transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
-  }
-  .kb-filter-pill:hover {
-    border-color: #0b2545;
-  }
-  .kb-filter-pill--active {
-    background: #0b2545;
-    border-color: #0b2545;
-    color: #ffffff;
-  }
-  .kb-card[draggable="true"] {
-    cursor: grab;
-  }
-  .kb-card--dragging {
-    opacity: 0.4;
-  }
-  .kb-column--drag-over {
-    outline: 2px dashed #0b2545;
-    outline-offset: -4px;
-  }
-  .kb-dates {
-    font-size: 12px;
-    color: #64748b;
-    margin: 0 0 10px;
-  }
-  .kb-dates--overdue {
-    color: #dc2626;
-    font-weight: 600;
-  }
-  .kb-date-inputs {
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-    flex-wrap: wrap;
-    margin-bottom: 10px;
-  }
-  .kb-date-field {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .kb-date-field label {
-    font-size: 11px;
-    color: #64748b;
-  }
-  .kb-date-field input {
-    font-size: 13px;
-    padding: 5px 8px;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    font-family: inherit;
-  }
-  .kb-link-btn {
-    appearance: none;
-    background: none;
-    border: none;
-    padding: 0;
-    font-size: 12px;
-    color: #0b2545;
-    text-decoration: underline;
-    cursor: pointer;
-    margin-bottom: 10px;
-  }
-`;
-
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
-
-  const cards = await prisma.kanbanCard.findMany({
-    where: { shop: session.shop },
-    orderBy: { createdAt: "asc" },
-  });
-
-  const personalizationIds = cards.map((card) => card.personalizationId);
-  const personalizations = await prisma.personalization.findMany({
-    where: { id: { in: personalizationIds }, shop: session.shop, isActive: true },
-    include: { proofs: true },
-  });
-
-  const partnerEmails = await prisma.partnerEmail.findMany({
-    where: { shop: session.shop },
-  });
-  const partnerEmailsByType = Object.fromEntries(
-    partnerEmails.map((p) => [p.type, p.email])
-  );
-
-  const activeIds = new Set(personalizations.map((p) => p.id));
-  return { cards: cards.filter((c) => activeIds.has(c.personalizationId)), personalizations, partnerEmailsByType };
+  const [cards, personalizations, dossiers, items, partners] = await Promise.all([
+    prisma.kanbanCard.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "asc" } }),
+    prisma.personalization.findMany({ where: { shop: session.shop, isActive: true }, include: { proofs: { where: { isCurrent: true }, orderBy: { createdAt: "desc" } } } }),
+    prisma.artworkCase.findMany({ where: { shop: session.shop, archivedAt: null } }),
+    prisma.artworkItem.findMany({ where: { shop: session.shop, isActive: true } }),
+    prisma.partnerEmail.findMany({ where: { shop: session.shop } }),
+  ]);
+  return { rows: cards.flatMap((card) => {
+    const p = personalizations.find((p) => p.id === card.personalizationId);
+    const dossier = dossiers.find((d) => d.draftOrderId === card.draftOrderId);
+    const item = items.find((i) => i.lineItemId === p?.lineItemId && i.draftOrderId === card.draftOrderId);
+    const summary = dossier && summarizeCase(items.filter((i) => i.draftOrderId === dossier.draftOrderId), personalizations.filter((p) => p.draftOrderId === dossier.draftOrderId));
+    return p && dossier && item?.requirement === "required" ? [{ card, p, dossier, blocked: summary.status !== "valide" || !isPersonalizationApproved(p) || !dossier.orderId }] : [];
+  }), partners: Object.fromEntries(partners.map((p) => [p.type, p.email])) };
 };
-
 export const action = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
-  const formData = await request.formData();
-  const intent = formData.get("intent");
-
-  // --- Envoyer les détails d'une personnalisation à un partenaire externe ---
-  if (intent === "email-card") {
-    const cardId = formData.get("cardId");
-    const partnerEmail = formData.get("partnerEmail");
-
-    const card = await prisma.kanbanCard.findUnique({ where: { id: cardId } });
-    if (!card || card.shop !== session.shop) {
-      return { success: false, error: "Carte introuvable." };
+  const { admin, session } = await authenticate.admin(request); const fd = await request.formData(); const intent = fd.get("intent");
+  try {
+    const card = await prisma.kanbanCard.findFirst({ where: { id: String(fd.get("cardId") || ""), shop: session.shop } });
+    if (!card) throw new Error("Travail de production introuvable.");
+    let dossier = await prisma.artworkCase.findUnique({ where: { shop_draftOrderId: { shop: session.shop, draftOrderId: card.draftOrderId } } });
+    if (!dossier || dossier.archivedAt) throw new Error("Ce dossier est archivé. Réactive-le avant de poursuivre.");
+    const draft = await metadata(admin, card.draftOrderId);
+    if (!draft) throw new Error("Le devis Shopify n’est plus disponible. La production est bloquée.");
+    await reconcileCase(admin, session.shop, draft);
+    dossier = await prisma.artworkCase.findUnique({ where: { id: dossier.id } });
+    const p = await prisma.personalization.findFirst({ where: { id: card.personalizationId, shop: session.shop, isActive: true }, include: { proofs: { where: { isCurrent: true }, orderBy: { createdAt: "desc" } } } });
+    const item = p && await prisma.artworkItem.findUnique({ where: { shop_draftOrderId_lineItemId: { shop: session.shop, draftOrderId: card.draftOrderId, lineItemId: p.lineItemId } } });
+    if (!p || !item?.isActive || item.requirement !== "required") throw new Error("Cet article ne fait plus partie des travaux à produire.");
+    const live = await readDossier(dossier.id, session.shop);
+    const ready = summarizeCase(live.items, live.personalizations).status === "valide" && isPersonalizationApproved(p) && Boolean(dossier.orderId);
+    if (intent === "email-card") {
+      if (!ready) throw new Error("Qualifie tous les articles et valide tous les BAT actuels du dossier avant de transmettre au partenaire.");
+      const email = String(fd.get("partnerEmail") || "").trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Indique une adresse email valide.");
+      const settings = await prisma.shopSettings.findUnique({ where: { shop: session.shop } });
+      await sendKanbanCardEmail({ to: email, orderName: `${card.orderName}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, item: p, subjectTemplate: settings?.partnerEmailSubject, messageTemplate: settings?.partnerEmailMessage });
+      await prisma.kanbanCard.update({ where: { id: card.id }, data: { lastSentAt: new Date(), lastSentTo: email } });
+      if (fd.get("rememberPartner") === "on") await prisma.partnerEmail.upsert({ where: { shop_type: { shop: session.shop, type: p.type } }, create: { shop: session.shop, type: p.type, email }, update: { email } });
+      await event(dossier.id, `Production transmise à ${email} : ${p.productTitle}, ${p.proofs.length} BAT actuel(s) validé(s).`);
+      return { success: true, message: "Dossier transmis au partenaire" };
     }
-    if (!partnerEmail) {
-      return { success: false, error: "Indique un email." };
+    if (intent === "set-dates") {
+      const start = String(fd.get("startDate") || ""); const end = String(fd.get("endDate") || "");
+      const valid = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+      if (!valid(start) || !valid(end) || (start && end && start > end)) throw new Error("La date de fin doit être valide et postérieure ou égale au début.");
+      await prisma.kanbanCard.update({ where: { id: card.id }, data: { startDate: start ? new Date(start) : null, endDate: end ? new Date(end) : null } });
+      await event(dossier.id, `Échéance de production mise à jour : ${p.productTitle}, ${end || "sans échéance"}.`);
+      return { success: true, message: "Échéance enregistrée" };
     }
-
-    const item = await prisma.personalization.findUnique({
-      where: { id: card.personalizationId },
-      include: { proofs: true },
-    });
-    if (!item || !item.isActive) {
-      return { success: false, error: "Personnalisation introuvable." };
+    if (intent === "archive-card" || intent === "restore-card") {
+      if (intent === "archive-card" && (card.status !== "termine" || !ready)) throw new Error("Termine ce travail et vérifie ses BAT avant de l’archiver.");
+      await prisma.kanbanCard.update({ where: { id: card.id }, data: { archivedAt: intent === "archive-card" ? new Date() : null } });
+      await event(dossier.id, `Travail ${intent === "archive-card" ? "archivé" : "réactivé"} : ${p.productTitle}.`);
+      return { success: true, message: intent === "archive-card" ? "Travail archivé" : "Travail réactivé" };
     }
-
-    const settings = await prisma.shopSettings.findUnique({
-      where: { shop: session.shop },
-    });
-
-    try {
-      await sendKanbanCardEmail({
-        to: partnerEmail,
-        orderName: card.orderName,
-        item,
-        subjectTemplate: settings?.partnerEmailSubject,
-        messageTemplate: settings?.partnerEmailMessage,
-      });
-    } catch (error) {
-      return { success: false, error: error.message };
+    if (intent === "move-card") {
+      const status = String(fd.get("status") || "");
+      if (!COLUMNS.some((c) => c.key === status)) throw new Error("Statut invalide.");
+      if (card.archivedAt) throw new Error("Réactive ce travail avant de le déplacer.");
+      if (status !== "a_faire" && !ready) throw new Error("Production bloquée : tous les BAT actuels doivent être approuvés.");
+      await prisma.kanbanCard.update({ where: { id: card.id }, data: { status } });
+      if (card.status !== status) await event(dossier.id, `Production : ${p.productTitle}, ${COLUMNS.find((c) => c.key === status).label.toLowerCase()}.`);
+      return { success: true, message: "Statut de production mis à jour" };
     }
-
-    // Mémorise cet email comme email habituel pour ce type de
-    // personnalisation, pour le pré-remplir automatiquement la prochaine fois.
-    await prisma.partnerEmail.upsert({
-      where: { shop_type: { shop: session.shop, type: item.type } },
-      update: { email: partnerEmail },
-      create: { shop: session.shop, type: item.type, email: partnerEmail },
-    });
-
-    return { success: true };
-  }
-
-  // --- Enregistrer les dates de début / fin prévues d'une carte ---
-  if (intent === "set-dates") {
-    const cardId = formData.get("cardId");
-    const startDateRaw = formData.get("startDate");
-    const endDateRaw = formData.get("endDate");
-
-    const card = await prisma.kanbanCard.findUnique({ where: { id: cardId } });
-    if (!card || card.shop !== session.shop) {
-      return { success: false, error: "Carte introuvable." };
-    }
-
-    await prisma.kanbanCard.update({
-      where: { id: cardId },
-      data: {
-        startDate: startDateRaw ? new Date(startDateRaw) : null,
-        endDate: endDateRaw ? new Date(endDateRaw) : null,
-      },
-    });
-
-    return { success: true };
-  }
-
-  // --- Déplacer une carte d'une colonne à l'autre (comportement par défaut, ---
-  // --- déclenché par les boutons ← / → ou par un glisser-déposer) ---
-  const cardId = formData.get("cardId");
-  const status = formData.get("status");
-
-  const card = await prisma.kanbanCard.findUnique({ where: { id: cardId } });
-  if (!card || card.shop !== session.shop) {
-    return { success: false, error: "Carte introuvable." };
-  }
-
-  await prisma.kanbanCard.update({ where: { id: cardId }, data: { status } });
-
-  return { success: true };
+    throw new Error("Action inconnue.");
+  } catch (e) { return { error: e.message }; }
 };
-
-function nextStatus(status) {
-  const index = COLUMNS.findIndex((c) => c.key === status);
-  return COLUMNS[index + 1]?.key;
-}
-
-function previousStatus(status) {
-  const index = COLUMNS.findIndex((c) => c.key === status);
-  return COLUMNS[index - 1]?.key;
-}
-
-function downloadHref(url, filename) {
-  return `/app/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
-}
-
-function ItemDetails({ item }) {
-  const approvedProof = item.proofs.find((proof) => proof.status === "approuve");
-
-  return (
-    <s-stack direction="block" gap="small-200">
-      <s-text>
-        Qté {item.quantity}
-        {item.size ? `, ${item.size}` : ""}
-        {item.color ? `, ${item.color}` : ""}
-        {item.location ? `, ${item.location}` : ""}
-      </s-text>
-      {item.customText && <s-text>« {item.customText} »</s-text>}
-      <s-stack direction="inline" gap="base">
-        {item.logoUrl && (
-          <s-stack direction="block" gap="small-200">
-            <s-text>Logo</s-text>
-            <s-thumbnail src={item.logoUrl} alt="Logo" size="base"></s-thumbnail>
-            <s-link href={downloadHref(item.logoUrl, `logo-${item.productTitle}`)} target="_blank">
-              Télécharger
-            </s-link>
-          </s-stack>
-        )}
-        {approvedProof ? (
-          <s-stack direction="block" gap="small-200">
-            <s-text>Proof approuvée</s-text>
-            {approvedProof.mimeType === "application/pdf" ? (
-              <s-link href={approvedProof.imageUrl} target="_blank">
-                📄 Voir le PDF
-              </s-link>
-            ) : (
-              <s-thumbnail src={approvedProof.imageUrl} alt="Proof approuvée" size="base"></s-thumbnail>
-            )}
-            <s-link
-              href={downloadHref(approvedProof.imageUrl, `proof-${item.productTitle}`)}
-              target="_blank"
-            >
-              Télécharger
-            </s-link>
-          </s-stack>
-        ) : (
-          <s-badge tone="critical">Aucune proof approuvée</s-badge>
-        )}
-      </s-stack>
-    </s-stack>
-  );
-}
-
-function SendCardEmailButton({ cardId, defaultEmail }) {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const formRef = useRef(null);
-  const [isOpen, setIsOpen] = useState(false);
-  const isSubmitting = fetcher.state !== "idle";
-
+function ProductionForm({ cardId, intent, children, label, onDone }) {
+  const fetcher = useFetcher(); const app = useAppBridge(); const [dirty, setDirty] = useState(false);
   useEffect(() => {
-    if (fetcher.data?.success) {
-      shopify.toast.show("Email envoyé au partenaire");
-      setIsOpen(false);
-    } else if (fetcher.data?.error) {
-      shopify.toast.show(`Erreur : ${fetcher.data.error}`, { isError: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetcher.data]);
-
-  const handleSend = () => {
-    const formData = new FormData(formRef.current);
-    formData.set("intent", "email-card");
-    formData.set("cardId", cardId);
-    fetcher.submit(formData, { method: "post" });
+    const before = (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", before); return () => window.removeEventListener("beforeunload", before);
+  }, [dirty]);
+  useEffect(() => { if (fetcher.state === "idle" && fetcher.data?.success) { setDirty(false); app.toast.show(fetcher.data.message); onDone?.(); } }, [fetcher.state, fetcher.data, app, onDone]);
+  return <fetcher.Form className="aw-form" data-production-editor={dirty ? "dirty" : "clean"} method="post" onChange={() => setDirty(true)}><input type="hidden" name="cardId" value={cardId}/><input type="hidden" name="intent" value={intent}/><fieldset disabled={fetcher.state !== "idle"}>{children}{fetcher.data?.error && <p className="aw-error" role="alert">{fetcher.data.error}</p>}<button className="aw-button primary">{fetcher.state !== "idle" ? "En cours…" : label}</button></fieldset></fetcher.Form>;
+}
+const date = (v) => v ? new Date(v).toLocaleDateString("fr-FR", { timeZone: "Europe/Paris" }) : "";
+const inputDate = (v) => v ? new Date(v).toISOString().slice(0, 10) : "";
+function ProductionCard({ row, partner, onDrag, onEnd }) {
+  const { card, p, dossier, blocked } = row; const [mode, setMode] = useState(null);
+  const toggleMode = (next) => {
+    if (document.querySelector(`[data-card-editor="${card.id}"] [data-production-editor="dirty"]`) && !window.confirm("Fermer sans enregistrer les modifications ?")) return;
+    setMode(mode === next ? null : next);
   };
-
-  if (!isOpen) {
-    return (
-      <s-button variant="secondary" onClick={() => setIsOpen(true)}>
-        Envoyer par email à un partenaire
-      </s-button>
-    );
-  }
-
-  return (
-    <form ref={formRef}>
-      <s-stack direction="block" gap="small-200">
-        <s-email-field
-          name="partnerEmail"
-          label="Email du partenaire"
-          defaultValue={defaultEmail || ""}
-          placeholder="email@partenaire.com"
-        ></s-email-field>
-        <s-stack direction="inline" gap="small-200">
-          <s-button variant="primary" loading={isSubmitting} onClick={handleSend}>
-            Envoyer
-          </s-button>
-          <s-button variant="tertiary" disabled={isSubmitting} onClick={() => setIsOpen(false)}>
-            Annuler
-          </s-button>
-        </s-stack>
-      </s-stack>
-    </form>
-  );
+  const overdue = card.endDate && card.status !== "termine" && inputDate(card.endDate) < new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Paris" });
+  return <article data-card-editor={card.id} className={`aw-production-card${overdue ? " overdue" : ""}${blocked ? " blocked" : ""}`} draggable={!blocked && !card.archivedAt && !mode} onDragStart={(e) => { e.dataTransfer.setData("text/plain", card.id); onDrag(card.id); }} onDragEnd={onEnd}>
+    <div className="aw-between"><strong>{dossier.yachtName || dossier.customerName || card.orderName}</strong><span className="aw-badge">{p.type}</span></div><h3>{p.productTitle}</h3><p className="aw-muted">{card.orderName} · {p.quantity} pièce(s)</p>
+    <p>{[p.dimensions, p.color, p.location, p.customText].filter(Boolean).join(" · ")}</p>
+    {blocked && <p className="aw-notice">Bloqué : dossier incomplet ou BAT actuel non validé. Qualifie les articles et valide tous les BAT du dossier avant production.</p>}
+    <p className={overdue ? "aw-error" : "aw-muted"}>{card.endDate ? `${overdue ? "En retard · " : "Échéance : "}${date(card.endDate)}` : "Échéance non définie"}</p>
+    <Link className="aw-button" to={`/app/personnalisation?case=${dossier.id}`}>Ouvrir le dossier</Link>
+    <details><summary>Fichiers de production</summary>{p.logoUrl && <a href={`/app/download?url=${encodeURIComponent(p.logoUrl)}&filename=${encodeURIComponent(p.logoFileName || `logo${fileExtension(p.logoMimeType, p.logoUrl)}`)}`} target="_blank" rel="noreferrer">Télécharger le logo</a>}{currentProofs(p).filter((proof) => proof.status === "approuve").map((proof) => <p key={proof.id}><a href={`/app/download?url=${encodeURIComponent(proof.imageUrl)}&filename=${encodeURIComponent(proof.fileName || `BAT-V${proof.version}${fileExtension(proof.mimeType, proof.imageUrl)}`)}`} target="_blank" rel="noreferrer">BAT V{proof.version} validé</a></p>)}</details>
+    {card.lastSentAt && <small>Transmis le {date(card.lastSentAt)} à {card.lastSentTo}</small>}
+    {!card.archivedAt && <><div className="aw-toolbar"><button className="aw-button" onClick={() => toggleMode("dates")}>Échéance</button><button className="aw-button" disabled={blocked} onClick={() => toggleMode("email")}>Transmettre au partenaire</button></div>
+      {mode === "dates" && <ProductionForm cardId={card.id} intent="set-dates" label="Enregistrer les dates" onDone={() => setMode(null)}><div className="aw-grid"><label>Début prévu<input type="date" name="startDate" defaultValue={inputDate(card.startDate)}/></label><label>Fin prévue<input type="date" name="endDate" defaultValue={inputDate(card.endDate)}/></label></div></ProductionForm>}
+      {mode === "email" && <ProductionForm cardId={card.id} intent="email-card" label="Confirmer la transmission" onDone={() => setMode(null)}><label>Email du partenaire<input type="email" name="partnerEmail" defaultValue={card.lastSentTo || partner || ""} required/></label><label className="aw-check"><input type="checkbox" name="rememberPartner"/>Utiliser comme partenaire par défaut pour {p.type.toLowerCase()}</label><p>{currentProofs(p).length} BAT actuel(s) validé(s) et le logo seront joints. Les anciennes versions sont exclues.</p></ProductionForm>}
+      <ProductionForm cardId={card.id} intent="move-card" label="Appliquer le statut"><label>État de production<select name="status" defaultValue={card.status}><option value="a_faire">À faire</option><option value="en_cours" disabled={blocked}>Démarrer la production</option><option value="termine" disabled={blocked}>Marquer comme terminé</option></select></label></ProductionForm>
+    </>}
+    {card.archivedAt ? <ProductionForm cardId={card.id} intent="restore-card" label="Réactiver le travail"/> : card.status === "termine" && !blocked && <ProductionForm cardId={card.id} intent="archive-card" label="Archiver le travail terminé"/>}
+  </article>;
 }
-
-function formatDate(value) {
-  if (!value) return null;
-  return new Date(value).toLocaleDateString("fr-FR");
-}
-
-function toDateInputValue(value) {
-  if (!value) return "";
-  return new Date(value).toISOString().slice(0, 10);
-}
-
-function isOverdue(card) {
-  if (!card.endDate || card.status === "termine") return false;
-  return new Date(card.endDate) < new Date(new Date().toDateString());
-}
-
-function CardDatesForm({ card }) {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const formRef = useRef(null);
-  const [isOpen, setIsOpen] = useState(false);
-  const isSubmitting = fetcher.state !== "idle";
-
-  useEffect(() => {
-    if (fetcher.data?.success) {
-      shopify.toast.show("Dates enregistrées");
-      setIsOpen(false);
-    } else if (fetcher.data?.error) {
-      shopify.toast.show(`Erreur : ${fetcher.data.error}`, { isError: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetcher.data]);
-
-  const handleSave = () => {
-    const formData = new FormData(formRef.current);
-    formData.set("intent", "set-dates");
-    formData.set("cardId", card.id);
-    fetcher.submit(formData, { method: "post" });
-  };
-
-  const overdue = isOverdue(card);
-
-  if (!isOpen) {
-    return (
-      <>
-        {card.startDate || card.endDate ? (
-          <p className={`kb-dates${overdue ? " kb-dates--overdue" : ""}`}>
-            {overdue ? "⚠ En retard — " : ""}
-            {formatDate(card.startDate) || "?"} → {formatDate(card.endDate) || "?"}
-          </p>
-        ) : (
-          <p className="kb-dates">Aucune échéance définie</p>
-        )}
-        <button type="button" className="kb-link-btn" onClick={() => setIsOpen(true)}>
-          {card.startDate || card.endDate ? "Modifier les dates" : "Ajouter des dates"}
-        </button>
-      </>
-    );
-  }
-
-  return (
-    <form ref={formRef}>
-      <div className="kb-date-inputs">
-        <div className="kb-date-field">
-          <label htmlFor={`start-${card.id}`}>Début</label>
-          <input
-            id={`start-${card.id}`}
-            type="date"
-            name="startDate"
-            defaultValue={toDateInputValue(card.startDate)}
-          />
-        </div>
-        <div className="kb-date-field">
-          <label htmlFor={`end-${card.id}`}>Fin</label>
-          <input
-            id={`end-${card.id}`}
-            type="date"
-            name="endDate"
-            defaultValue={toDateInputValue(card.endDate)}
-          />
-        </div>
-      </div>
-      <s-stack direction="inline" gap="small-200">
-        <s-button variant="primary" loading={isSubmitting} onClick={handleSave}>
-          Enregistrer
-        </s-button>
-        <s-button variant="tertiary" disabled={isSubmitting} onClick={() => setIsOpen(false)}>
-          Annuler
-        </s-button>
-      </s-stack>
-    </form>
-  );
-}
-
-function KanbanCardView({ card, item, defaultPartnerEmail, onDragStart, onDragEnd, isDragging }) {
-  const fetcher = useFetcher();
-  const isSubmitting = fetcher.state !== "idle";
-  const prev = previousStatus(card.status);
-  const next = nextStatus(card.status);
-  const accent = colorForType(item.type);
-
-  const moveCard = (status) => {
-    const formData = new FormData();
-    formData.set("cardId", card.id);
-    formData.set("status", status);
-    fetcher.submit(formData, { method: "post" });
-  };
-
-  return (
-    <div
-      className={`kb-card${isDragging ? " kb-card--dragging" : ""}`}
-      style={{ "--kb-accent": accent }}
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.setData("text/plain", card.id);
-        event.dataTransfer.effectAllowed = "move";
-        onDragStart(card.id);
-      }}
-      onDragEnd={onDragEnd}
-    >
-      <span className="kb-chip" style={{ background: accent }}>
-        {item.type}
-      </span>
-      <p className="kb-card-title">{item.productTitle}</p>
-      <p className="kb-card-order">{card.orderName}</p>
-
-      <CardDatesForm card={card} />
-
-      <ItemDetails item={item} />
-
-      <s-stack direction="inline" gap="small-200">
-        {prev && (
-          <s-button variant="tertiary" disabled={isSubmitting} onClick={() => moveCard(prev)}>
-            ← {COLUMNS.find((c) => c.key === prev).label}
-          </s-button>
-        )}
-        {next && (
-          <s-button variant="tertiary" disabled={isSubmitting} onClick={() => moveCard(next)}>
-            {COLUMNS.find((c) => c.key === next).label} →
-          </s-button>
-        )}
-      </s-stack>
-
-      <div style={{ marginTop: "8px" }}>
-        <SendCardEmailButton cardId={card.id} defaultEmail={defaultPartnerEmail} />
-      </div>
-    </div>
-  );
-}
-
 export default function Kanban() {
-  const { cards, personalizations, partnerEmailsByType } = useLoaderData();
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [draggingCardId, setDraggingCardId] = useState(null);
-  const [dragOverColumn, setDragOverColumn] = useState(null);
-  const moveFetcher = useFetcher();
-
-  const cardsWithItems = cards
-    .map((card) => ({
-      card,
-      item: personalizations.find((p) => p.id === card.personalizationId),
-    }))
-    .filter(({ item }) => item);
-
-  const visibleCards =
-    typeFilter === "all"
-      ? cardsWithItems
-      : cardsWithItems.filter(({ item }) => item.type === typeFilter);
-
-  const dropCardOnColumn = (columnKey) => {
-    if (draggingCardId) {
-      const formData = new FormData();
-      formData.set("cardId", draggingCardId);
-      formData.set("status", columnKey);
-      moveFetcher.submit(formData, { method: "post" });
-    }
-    setDraggingCardId(null);
-    setDragOverColumn(null);
-  };
-
-  return (
-    <s-page heading="Suivi de production">
-      <style>{KANBAN_STYLES}</style>
-
-      {cards.length === 0 && (
-        <s-paragraph>
-          Aucune carte pour le moment. Une carte est créée automatiquement, par
-          produit personnalisé, quand un devis brouillon est complété en
-          commande.
-        </s-paragraph>
-      )}
-
-      {cards.length > 0 && (
-        <div className="kb-filter-row">
-          {["all", ...TYPES].map((type) => (
-            <button
-              key={type}
-              type="button"
-              className={`kb-filter-pill${typeFilter === type ? " kb-filter-pill--active" : ""}`}
-              onClick={() => setTypeFilter(type)}
-            >
-              {type === "all" ? "Tous" : type}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="kb-board">
-        {COLUMNS.map((column) => {
-          const columnCards = visibleCards.filter(({ card }) => card.status === column.key);
-          return (
-            <div
-              key={column.key}
-              className={`kb-column${dragOverColumn === column.key ? " kb-column--drag-over" : ""}`}
-              style={{ background: column.tint }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                if (dragOverColumn !== column.key) setDragOverColumn(column.key);
-              }}
-              onDragLeave={() => setDragOverColumn(null)}
-              onDrop={(event) => {
-                event.preventDefault();
-                dropCardOnColumn(column.key);
-              }}
-            >
-              <div className="kb-column-header">
-                <span className="kb-column-title">{column.label}</span>
-                <span className="kb-column-count">{columnCards.length}</span>
-              </div>
-              {columnCards.length === 0 && (
-                <p className="kb-column-empty">Aucune carte</p>
-              )}
-              {columnCards.map(({ card, item }) => (
-                <KanbanCardView
-                  key={card.id}
-                  card={card}
-                  item={item}
-                  defaultPartnerEmail={partnerEmailsByType[item.type]}
-                  isDragging={draggingCardId === card.id}
-                  onDragStart={setDraggingCardId}
-                  onDragEnd={() => setDraggingCardId(null)}
-                />
-              ))}
-            </div>
-          );
-        })}
-      </div>
-    </s-page>
-  );
+  const { rows, partners } = useLoaderData(); const [params, setParams] = useSearchParams();
+  const q = params.get("q") || ""; const type = params.get("type") || "all"; const archived = params.get("archives") === "1"; const list = params.get("view") === "list";
+  const updateFilter = (name, value) => { if (document.querySelector('[data-production-editor="dirty"]') && !window.confirm("Changer de vue sans enregistrer les modifications ?")) return; const next = new URLSearchParams(params); if (value) next.set(name, value); else next.delete(name); setParams(next, { replace: true }); };
+  const [dragged, setDragged] = useState(null); const [over, setOver] = useState(null); const fetcher = useFetcher(); const revalidator = useRevalidator();
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => currentLocation.pathname !== nextLocation.pathname && Boolean(document.querySelector('[data-production-editor="dirty"]')));
+  useEffect(() => { if (blocker.state === "blocked") { if (window.confirm("Quitter sans enregistrer les modifications de production ?")) blocker.proceed(); else blocker.reset(); } }, [blocker]);
+  useEffect(() => { const timer = setInterval(() => { if (document.visibilityState === "visible" && !document.querySelector('[data-production-editor="dirty"]') && revalidator.state === "idle") revalidator.revalidate(); }, 45000); return () => clearInterval(timer); }, [revalidator]);
+  const visible = rows.filter(({ card, p, dossier }) => Boolean(card.archivedAt) === archived && (type === "all" || p.type === type) && `${card.orderName} ${p.productTitle} ${dossier.yachtName || ""} ${dossier.customerName || ""} ${card.lastSentTo || ""}`.toLowerCase().includes(q.toLowerCase())).sort((a, b) => (a.card.endDate ? new Date(a.card.endDate).getTime() : Infinity) - (b.card.endDate ? new Date(b.card.endDate).getTime() : Infinity) || new Date(a.card.createdAt) - new Date(b.card.createdAt));
+  const drop = (status) => { if (dragged) { fetcher.submit({ intent: "move-card", cardId: dragged, status }, { method: "post" }); } setDragged(null); setOver(null); };
+  return <s-page heading="Suivi de production"><style>{WORKSPACE_STYLES}</style><main className="aw-workspace"><h1>Suivi de production</h1><p className="aw-muted">Travaux des commandes Shopify, classés par échéance. Seuls les BAT actuels validés peuvent être transmis.</p>
+    <section className="aw-panel"><div className="aw-toolbar"><label className="aw-grow">Rechercher<input value={q} onChange={(e) => updateFilter("q", e.target.value)} placeholder="Commande, yacht, client, produit ou partenaire"/></label><label>Technique<select value={type} onChange={(e) => updateFilter("type", e.target.value)}><option value="all">Toutes</option>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></label><button className="aw-button" onClick={() => updateFilter("archives", archived ? "" : "1")}>{archived ? "Voir les actifs" : "Archives"}</button><button className="aw-button" onClick={() => updateFilter("view", list ? "" : "list")}>{list ? "Vue tableau" : "Vue liste"}</button></div><p>{visible.length} travail(s) · {visible.filter((r) => r.blocked).length} bloqué(s)</p></section>
+    {fetcher.data?.error && <p role="alert" className="aw-error">{fetcher.data.error}</p>}
+    {!visible.length && <section className="aw-panel aw-empty"><h2>Aucun travail dans cette vue</h2><p>Les cartes apparaissent pour les articles avec BAT requis lorsque le devis devient une commande Shopify. Essaie aussi un autre filtre.</p></section>}
+    {list ? <div>{visible.map((row) => <ProductionCard key={row.card.id} row={row} partner={partners[row.p.type]} onDrag={setDragged} onEnd={() => setDragged(null)}/>)}</div> : <div className="aw-production-grid">{COLUMNS.map((col) => <section key={col.key} className={`aw-production-column${over === col.key ? " dragover" : ""}`} onDragOver={(e) => { if (dragged) { e.preventDefault(); setOver(col.key); } }} onDragLeave={() => setOver(null)} onDrop={(e) => { e.preventDefault(); drop(col.key); }}><h2>{col.label} ({visible.filter((r) => r.card.status === col.key).length})</h2>{visible.filter((r) => r.card.status === col.key).map((row) => <ProductionCard key={row.card.id} row={row} partner={partners[row.p.type]} onDrag={setDragged} onEnd={() => setDragged(null)}/>)}</section>)}</div>}
+  </main></s-page>;
 }

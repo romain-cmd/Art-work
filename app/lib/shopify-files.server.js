@@ -153,5 +153,6 @@ export async function uploadFileToShopify(admin, file) {
   }
 
   console.log(`[uploadFileToShopify] terminé — url: ${url}`);
+  if (!url) throw new Error("Shopify traite encore ce fichier. Aucun BAT n’a été enregistré : réessaie dans quelques instants.");
   return url;
 }

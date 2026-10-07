@@ -10,7 +10,7 @@ export const loader = async ({ request }) => {
 
   const url = new URL(request.url);
   const fileUrl = url.searchParams.get("url");
-  const filename = url.searchParams.get("filename") || "fichier";
+  const filename = (url.searchParams.get("filename") || "fichier").replace(/["\r\n\\/]/g, "_").slice(0, 180);
 
   if (!fileUrl) {
     throw new Response("Missing url parameter", { status: 400 });
@@ -22,7 +22,7 @@ export const loader = async ({ request }) => {
   } catch {
     throw new Response("Invalid url", { status: 400 });
   }
-  if (!ALLOWED_HOSTS.includes(parsed.hostname)) {
+  if (parsed.protocol !== "https:" || !ALLOWED_HOSTS.includes(parsed.hostname)) {
     throw new Response("Host not allowed", { status: 400 });
   }
 

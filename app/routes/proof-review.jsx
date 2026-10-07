@@ -2,79 +2,47 @@
 import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
 import prisma from "../db.server";
+import { event } from "../lib/artwork-cases.server";
 import { sendInternalNotificationEmail } from "../lib/send-internal-notification-email.server";
 
 // PUBLIC route (no "app." prefix): no Shopify authentication here,
 // since this is opened by the end customer from their email.
 export const loader = async ({ request }) => {
-  const url = new URL(request.url);
-  const tokensParam = url.searchParams.get("tokens") || "";
-  const tokens = tokensParam.split(",").filter(Boolean);
-
-  if (tokens.length === 0) {
-    return { proofs: [] };
-  }
-
-  const proofs = await prisma.proof.findMany({
-    where: { token: { in: tokens }, personalization: { isActive: true } },
-    include: { personalization: true },
-    orderBy: { createdAt: "asc" },
-  });
-
-  return { proofs };
+  const tokens = (new URL(request.url).searchParams.get("tokens") || "").split(",").filter(Boolean).slice(0, 200);
+  if (!tokens.length) return { proofs: [], dossier: null };
+  const candidates = await prisma.proof.findMany({ where: { token: { in: tokens }, personalization: { isActive: true } }, include: { personalization: true }, orderBy: { createdAt: "asc" } });
+  if (!candidates.length) return { proofs: [], dossier: null };
+  const first = candidates[0].personalization;
+  const dossier = await prisma.artworkCase.findUnique({ where: { shop_draftOrderId: { shop: first.shop, draftOrderId: first.draftOrderId } } });
+  if (!dossier || dossier.archivedAt) return { proofs: [], dossier: null };
+  const required = await prisma.artworkItem.findMany({ where: { shop: first.shop, draftOrderId: first.draftOrderId, isActive: true, requirement: "required" } });
+  const proofs = candidates.filter((p) => p.personalization.shop === first.shop && p.personalization.draftOrderId === first.draftOrderId && required.some((i) => i.lineItemId === p.personalization.lineItemId) && (p.envoyeLe || p.status !== "en_attente"));
+  return { proofs: proofs.map((p) => ({ ...p, personalization: p.snapshot || p.personalization })), dossier: { name: dossier.name, yachtName: dossier.yachtName, customerName: dossier.customerName } };
 };
 
 export const action = async ({ request }) => {
-  const formData = await request.formData();
-  const token = formData.get("token");
-  const decision = formData.get("decision"); // "approuve" | "modification_demandee"
-  const commentaireClient = formData.get("commentaireClient") || null;
-
-  const proof = await prisma.proof.findUnique({
-    where: { token },
-    include: { personalization: true },
+  const fd = await request.formData(); const token = String(fd.get("token") || ""); const decision = fd.get("decision"); const comment = String(fd.get("commentaireClient") || "").trim().slice(0, 4000);
+  if (!["approuve", "modification_demandee"].includes(decision)) return { error: "Invalid decision." };
+  if (decision === "modification_demandee" && !comment) return { error: "Please describe the changes you need." };
+  const proof = await prisma.proof.findUnique({ where: { token }, include: { personalization: true } });
+  if (!proof?.isCurrent || !proof.personalization.isActive || !proof.envoyeLe) return { error: "This version is no longer available for approval. Please use the latest email from our team." };
+  const dossier = await prisma.artworkCase.findUnique({ where: { shop_draftOrderId: { shop: proof.personalization.shop, draftOrderId: proof.personalization.draftOrderId } } });
+  const item = await prisma.artworkItem.findUnique({ where: { shop_draftOrderId_lineItemId: { shop: proof.personalization.shop, draftOrderId: proof.personalization.draftOrderId, lineItemId: proof.personalization.lineItemId } } });
+  if (!dossier || dossier.archivedAt || !item?.isActive || item.requirement !== "required") return { error: "This design is no longer awaiting approval." };
+  const changed = await prisma.$transaction(async (tx) => {
+    const update = await tx.proof.updateMany({ where: { id: proof.id, isCurrent: true, status: "en_attente" }, data: { status: decision, commentaireClient: decision === "modification_demandee" ? comment : null, reponduLe: new Date(), approvedVia: "Lien client" } });
+    if (update.count) await event(dossier.id, `BAT V${proof.version} ${decision === "approuve" ? "validé" : "à corriger"} : ${proof.personalization.productTitle}.${comment ? ` Commentaire : ${comment}` : ""}`, "Client", tx);
+    return update.count;
   });
-  if (!proof || !proof.personalization.isActive) {
-    return { success: false, error: "This design could not be found." };
-  }
-
-  if (decision !== "approuve" && decision !== "modification_demandee") {
-    return { success: false, error: "Invalid decision." };
-  }
-
-  await prisma.proof.update({
-    where: { token },
-    data: {
-      status: decision,
-      commentaireClient: decision === "modification_demandee" ? commentaireClient : null,
-      reponduLe: new Date(),
-    },
-  });
-
-  // La notification interne ne doit jamais faire échouer la réponse du
-  // client, même si l'envoi de l'email plante.
+  if (!changed) return { error: "A response has already been recorded for this design. Refresh the page to see it." };
   try {
-    const settings = await prisma.shopSettings.findUnique({
-      where: { shop: proof.personalization.shop },
-    });
+    const settings = await prisma.shopSettings.findUnique({ where: { shop: proof.personalization.shop } });
     if (settings?.notificationEmail) {
       // eslint-disable-next-line no-undef
-      const adminUrl = process.env.SHOPIFY_APP_URL
-        ? // eslint-disable-next-line no-undef
-          `${process.env.SHOPIFY_APP_URL}/app/personnalisation`
-        : null;
-      await sendInternalNotificationEmail({
-        to: settings.notificationEmail,
-        productTitle: proof.personalization.productTitle,
-        decision,
-        comment: decision === "modification_demandee" ? commentaireClient : null,
-        adminUrl,
-      });
+      const adminUrl = `${process.env.SHOPIFY_APP_URL}/app/personnalisation?case=${dossier.id}`;
+      await sendInternalNotificationEmail({ to: settings.notificationEmail, productTitle: proof.personalization.productTitle, decision, comment: decision === "modification_demandee" ? comment : null, adminUrl });
     }
-  } catch (error) {
-    console.error("Failed to send internal notification email", error);
-  }
-
+  } catch (error) { console.error("Failed to send internal notification email", error); }
   return { success: true, token, status: decision };
 };
 
@@ -310,11 +278,12 @@ const PAGE_STYLES = `
 // only the fields that were actually filled in are shown.
 function PersonalizationDetails({ personalization }) {
   const rows = [
-    ["Type", personalization.type],
+    ["Technique", ({ Broderie: "Embroidery", Impression: "Print", Gravure: "Engraving", "Sérigraphie": "Screen printing" })[personalization.type] || personalization.type],
     ["Quantity", personalization.quantity],
-    ["Size", personalization.size],
-    ["Color", personalization.color],
-    ["Placement", personalization.location],
+    ["Marking dimensions", personalization.dimensions],
+    ["Previous size information", personalization.size],
+    ["Marking colour", personalization.color],
+    ["Placement", ({ "Poitrine gauche": "Left chest", "Poitrine droite": "Right chest", Manche: "Sleeve", Dos: "Back", Autre: "Other" })[personalization.location] || personalization.location],
     ["Custom text", personalization.customText],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "");
 
@@ -345,7 +314,7 @@ function ProofCard({ proof }) {
   // below always reflects the database for THIS card, without ever
   // touching the other cards on the page.
   const isSubmitting = fetcher.state !== "idle";
-  const alreadyAnswered = proof.status !== "en_attente";
+  const alreadyAnswered = proof.status !== "en_attente" || !proof.isCurrent;
 
   useEffect(() => {
     if (fetcher.data?.success) {
@@ -367,6 +336,7 @@ function ProofCard({ proof }) {
     <div className="pr-card">
       <h3 className="pr-card-title">{proof.personalization.productTitle}</h3>
 
+      <p className="pr-comment">Design version {proof.version}{!proof.isCurrent ? " · Replaced by a newer version. Please use the latest email." : ""}</p>
       <PersonalizationDetails personalization={proof.personalization} />
 
       {proof.mimeType === "application/pdf" ? (
@@ -386,7 +356,7 @@ function ProofCard({ proof }) {
           </a>
         </>
       ) : (
-        <img className="pr-image" src={proof.imageUrl} alt="Proposed design" />
+        <a href={proof.imageUrl} target="_blank" rel="noreferrer" aria-label="Open full-size design"><img className="pr-image" src={proof.imageUrl} alt="Proposed design" /></a>
       )}
 
       {proof.status === "approuve" && (
@@ -409,7 +379,7 @@ function ProofCard({ proof }) {
             disabled={isSubmitting}
             onClick={() => submitDecision("approuve")}
           >
-            Approve
+            {isSubmitting ? "Saving…" : "Approve this design"}
           </button>
           <button
             type="button"
@@ -458,44 +428,18 @@ function ProofCard({ proof }) {
 }
 
 export default function ProofReview() {
-  const { proofs } = useLoaderData();
-  const allAnswered =
-    proofs.length > 0 && proofs.every((proof) => proof.status !== "en_attente");
-
-  // Once the customer has responded to every design shown, the page's
-  // data refreshes automatically in the background: this final screen
-  // appears without a page reload.
-  if (allAnswered) {
-    return (
-      <div className="pr-page">
-        <style>{PAGE_STYLES}</style>
-        <div className="pr-thankyou">
-          <div className="pr-thankyou-icon">✓</div>
-          <h1>Thank you!</h1>
-          <p>
-            All your responses have been sent to our team. We&apos;ll be in
-            touch shortly regarding your order.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="pr-page">
-      <style>{PAGE_STYLES}</style>
-      <div className="pr-container">
-        <p className="pr-eyebrow">Design approval</p>
-        <h1 className="pr-title">Review your designs</h1>
-
-        {proofs.length === 0 && (
-          <div className="pr-empty">This link is invalid or has expired.</div>
-        )}
-
-        {proofs.map((proof) => (
-          <ProofCard key={proof.id} proof={proof} />
-        ))}
-      </div>
-    </div>
-  );
+  const { proofs, dossier } = useLoaderData();
+  const actionable = proofs.filter((p) => p.isCurrent);
+  const answered = actionable.filter((p) => p.status !== "en_attente").length;
+  const allAnswered = actionable.length > 0 && answered === actionable.length;
+  return <div className="pr-page"><style>{PAGE_STYLES}</style><div className="pr-container">
+    <p className="pr-eyebrow">Marina Yacht Wear · Artwork approval</p>
+    <h1 className="pr-title">{dossier?.yachtName || "Review your designs"}</h1>
+    {dossier && <p>{dossier.name}{dossier.customerName ? ` · ${dossier.customerName}` : ""}</p>}
+    {actionable.length > 0 && <p aria-live="polite">{answered} of {actionable.length} designs reviewed</p>}
+    {allAnswered && <div className="pr-empty"><h2>Thank you!</h2><p>Your responses have been recorded. Your decisions and designs remain available below.</p></div>}
+    {!proofs.length && <div className="pr-empty">This link is unavailable. Please contact your Marina Yacht Wear representative for the latest designs.</div>}
+    {proofs.map((proof) => <ProofCard key={proof.id} proof={proof}/>)}
+    <p className="pr-comment">Please check the design, placement, marking dimensions and colour before approving. Requests for changes are sent directly to our team.</p>
+  </div></div>;
 }
