@@ -1,12 +1,13 @@
 /* eslint-disable react/prop-types -- no PropTypes package in this project */
 import { useEffect, useRef, useState } from "react";
-import { useFetcher, useLoaderData, useNavigate, useNavigation } from "react-router";
+import { useFetcher, useLoaderData, useNavigate, useNavigation, useRevalidator } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { uploadFileToShopify } from "../lib/shopify-files.server";
 import { sendProofValidationEmail } from "../lib/send-proof-email.server";
 import { ORDER_STATUS_COLORS } from "../lib/design-tokens";
+import { fetchDraftLineItems, syncDraftPersonalizations } from "../lib/draft-order-sync.server";
 
 const STATUS_BADGE = {
   en_attente: { label: "En attente", tone: "info" },
@@ -217,56 +218,72 @@ export const loader = async ({ request }) => {
   const requestedLimit = Number(url.searchParams.get("limit")) || PAGE_SIZE;
   const limit = Math.min(Math.max(requestedLimit, PAGE_SIZE), MAX_LIMIT);
 
-  const response = await admin.graphql(
-    `#graphql
-      query getDraftOrders($limit: Int!) {
-        draftOrders(
-          first: $limit
-          query: "status:open OR status:completed"
-          sortKey: ID
-          reverse: true
-        ) {
-          edges {
-            node {
-              id
-              name
-              email
-              createdAt
-              lineItems(first: 20) {
-                edges {
-                  node {
-                    id
-                    title
-                    quantity
-                    custom
+  const orderEdges = [];
+  let after = null;
+  let hasNextPage = true;
+  // Bound nested query cost, even when loading 250 drafts.
+  while (orderEdges.length < limit && hasNextPage) {
+    const response = await admin.graphql(
+      `#graphql
+        query getDraftOrders($limit: Int!, $after: String) {
+          draftOrders(
+            first: $limit
+            after: $after
+            query: "status:open OR status:completed"
+            sortKey: ID
+            reverse: true
+          ) {
+            edges {
+              node {
+                id
+                name
+                email
+                createdAt
+                lineItems(first: 10) {
+                  edges {
+                    node {
+                      id
+                      title
+                      quantity
+                      custom
+                      variant { id }
+                    }
                   }
+                  pageInfo { hasNextPage endCursor }
                 }
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
           }
-          pageInfo {
-            hasNextPage
-          }
-        }
-      }`,
-    { variables: { limit } }
-  );
+        }`,
+      { variables: { limit: Math.min(25, limit - orderEdges.length), after } }
+    );
 
-  const data = await response.json();
-  const draftOrders = data.data.draftOrders.edges.map((edge) => {
+    const data = await response.json();
+    if (data.errors?.length || !data.data?.draftOrders) {
+      throw new Error("Impossible de récupérer les devis Shopify.");
+    }
+    orderEdges.push(...data.data.draftOrders.edges);
+    hasNextPage = data.data.draftOrders.pageInfo.hasNextPage;
+    after = data.data.draftOrders.pageInfo.endCursor;
+  }
+  const draftOrders = [];
+  for (const edge of orderEdges) {
     const order = edge.node;
-    return {
+    const edges = await fetchDraftLineItems(admin, order.id, order.lineItems);
+    await syncDraftPersonalizations(prisma, session.shop, order.id, edges.map(({ node }) => node));
+    draftOrders.push({
       ...order,
-      lineItems: {
-        edges: order.lineItems.edges.filter(({ node }) => !node.custom),
-      },
-    };
-  });
-  const hasNextPage = data.data.draftOrders.pageInfo.hasNextPage;
+      lineItems: { edges },
+    });
+  }
   const draftOrderIds = draftOrders.map((order) => order.id);
 
   const personalizations = await prisma.personalization.findMany({
-    where: { shop: session.shop, draftOrderId: { in: draftOrderIds } },
+    where: { shop: session.shop, draftOrderId: { in: draftOrderIds }, isActive: true },
     include: { proofs: { orderBy: { createdAt: "asc" } } },
     orderBy: { createdAt: "asc" },
   });
@@ -286,7 +303,7 @@ export const action = async ({ request }) => {
     const personalization = await prisma.personalization.findUnique({
       where: { id: personalizationId },
     });
-    if (!personalization || personalization.shop !== session.shop) {
+    if (!personalization || !personalization.isActive || personalization.shop !== session.shop) {
       return { success: false, error: "Personnalisation introuvable." };
     }
 
@@ -320,7 +337,7 @@ export const action = async ({ request }) => {
     const personalization = await prisma.personalization.findUnique({
       where: { id: personalizationId },
     });
-    if (!personalization || personalization.shop !== session.shop) {
+    if (!personalization || !personalization.isActive || personalization.shop !== session.shop) {
       return { success: false, error: "Personnalisation introuvable." };
     }
     if (!newLogo || newLogo.size === 0) {
@@ -349,7 +366,7 @@ export const action = async ({ request }) => {
     const personalization = await prisma.personalization.findUnique({
       where: { id: personalizationId },
     });
-    if (!personalization || personalization.shop !== session.shop) {
+    if (!personalization || !personalization.isActive || personalization.shop !== session.shop) {
       return { success: false, error: "Personnalisation introuvable." };
     }
 
@@ -376,7 +393,7 @@ export const action = async ({ request }) => {
       where: { id: proofId },
       include: { personalization: true },
     });
-    if (!proof || proof.personalization.shop !== session.shop) {
+    if (!proof || !proof.personalization.isActive || proof.personalization.shop !== session.shop) {
       return { success: false, error: "Proof introuvable." };
     }
 
@@ -397,7 +414,7 @@ export const action = async ({ request }) => {
       where: { id: proofId },
       include: { personalization: true },
     });
-    if (!proof || proof.personalization.shop !== session.shop) {
+    if (!proof || !proof.personalization.isActive || proof.personalization.shop !== session.shop) {
       return { success: false, error: "Proof introuvable." };
     }
     if (!newImage || newImage.size === 0) {
@@ -436,10 +453,13 @@ export const action = async ({ request }) => {
       return { success: false, error: "Indique un email." };
     }
 
+    const currentItems = await fetchDraftLineItems(admin, draftOrderId);
+    await syncDraftPersonalizations(prisma, session.shop, draftOrderId, currentItems.map(({ node }) => node));
+
     const pendingProofs = await prisma.proof.findMany({
       where: {
         status: "en_attente",
-        personalization: { draftOrderId, shop: session.shop },
+        personalization: { draftOrderId, shop: session.shop, isActive: true },
       },
       include: { personalization: true },
     });
@@ -483,7 +503,6 @@ export const action = async ({ request }) => {
   // --- Créer une personnalisation (comportement par défaut) ---
   const draftOrderId = formData.get("draftOrderId");
   const lineItemId = formData.get("lineItemId");
-  const productTitle = formData.get("productTitle");
   const type = formData.get("type");
   const quantity = Number(formData.get("quantity"));
   const size = formData.get("size") || null;
@@ -491,6 +510,12 @@ export const action = async ({ request }) => {
   const location = formData.get("location") || null;
   const customText = formData.get("customText") || null;
   const logoFile = formData.get("logo");
+
+  const currentItems = await fetchDraftLineItems(admin, draftOrderId);
+  const currentItem = currentItems.find(({ node }) => node.id === lineItemId)?.node;
+  if (!currentItem) {
+    return { success: false, error: "Cet article a été modifié ou retiré du devis. Actualise la liste." };
+  }
 
   let logoUrl = null;
   try {
@@ -506,7 +531,9 @@ export const action = async ({ request }) => {
       shop: session.shop,
       draftOrderId,
       lineItemId,
-      productTitle,
+      productTitle: currentItem.title,
+      variantId: currentItem.variant?.id ?? null,
+      sourceQuantity: currentItem.quantity,
       type,
       quantity,
       size,
@@ -1187,9 +1214,32 @@ export default function Personnalisation() {
   const { draftOrders, personalizations, hasNextPage, limit } = useLoaderData();
   const navigate = useNavigate();
   const navigation = useNavigation();
+  const revalidator = useRevalidator();
   const [selectedItem, setSelectedItem] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
   const isLoadingMore = navigation.state !== "idle";
+
+  // Changes made in Shopify do not trigger React Router navigation in this iframe.
+  // Refresh on return, and while visible, without interrupting an open editor.
+  useEffect(() => {
+    const refresh = () => {
+      const editing = selectedItem ||
+        document.querySelector('input[name="intent"][value="update-personalization"], input[name="intent"][value="update-logo"], input[name="intent"][value="revise-proof"]') ||
+        [...document.querySelectorAll('input[type="file"]')].some((input) => input.files.length > 0);
+      if (document.visibilityState === "visible" && !editing &&
+          navigation.state === "idle" && revalidator.state === "idle") {
+        revalidator.revalidate();
+      }
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const interval = window.setInterval(refresh, 15000);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearInterval(interval);
+    };
+  }, [selectedItem, navigation.state, revalidator]);
 
   const handleLoadMore = () => {
     navigate(`?limit=${limit + PAGE_SIZE}`, { preventScrollReset: true });
@@ -1229,6 +1279,12 @@ export default function Personnalisation() {
   return (
     <s-page heading="Personnalisation">
       <style>{PAGE_STYLES}</style>
+
+      <button type="button" className="pz-link-btn"
+        disabled={revalidator.state !== "idle" || navigation.state !== "idle"}
+        onClick={() => { setSelectedItem(null); revalidator.revalidate(); }}>
+        Actualiser les articles
+      </button>
 
       <AttentionBanner proofs={proofsNeedingAttention} />
 

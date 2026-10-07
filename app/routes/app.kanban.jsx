@@ -181,7 +181,7 @@ export const loader = async ({ request }) => {
 
   const personalizationIds = cards.map((card) => card.personalizationId);
   const personalizations = await prisma.personalization.findMany({
-    where: { id: { in: personalizationIds } },
+    where: { id: { in: personalizationIds }, shop: session.shop, isActive: true },
     include: { proofs: true },
   });
 
@@ -192,7 +192,8 @@ export const loader = async ({ request }) => {
     partnerEmails.map((p) => [p.type, p.email])
   );
 
-  return { cards, personalizations, partnerEmailsByType };
+  const activeIds = new Set(personalizations.map((p) => p.id));
+  return { cards: cards.filter((c) => activeIds.has(c.personalizationId)), personalizations, partnerEmailsByType };
 };
 
 export const action = async ({ request }) => {
@@ -217,7 +218,7 @@ export const action = async ({ request }) => {
       where: { id: card.personalizationId },
       include: { proofs: true },
     });
-    if (!item) {
+    if (!item || !item.isActive) {
       return { success: false, error: "Personnalisation introuvable." };
     }
 

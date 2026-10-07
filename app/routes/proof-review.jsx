@@ -16,7 +16,7 @@ export const loader = async ({ request }) => {
   }
 
   const proofs = await prisma.proof.findMany({
-    where: { token: { in: tokens } },
+    where: { token: { in: tokens }, personalization: { isActive: true } },
     include: { personalization: true },
     orderBy: { createdAt: "asc" },
   });
@@ -34,7 +34,7 @@ export const action = async ({ request }) => {
     where: { token },
     include: { personalization: true },
   });
-  if (!proof) {
+  if (!proof || !proof.personalization.isActive) {
     return { success: false, error: "This design could not be found." };
   }
 

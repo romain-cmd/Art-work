@@ -37,6 +37,9 @@ model Personalization {
   shop            String
   draftOrderId    String
   lineItemId      String
+  variantId       String?
+  sourceQuantity  Int?
+  isActive        Boolean  @default(true)
   productTitle    String
   type            String
   quantity        Int
