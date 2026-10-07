@@ -230,7 +230,7 @@ export const loader = async ({ request }) => {
             first: $limit
             after: $after
             query: "status:open OR status:completed"
-            sortKey: ID
+            sortKey: UPDATED_AT
             reverse: true
           ) {
             edges {
@@ -239,6 +239,7 @@ export const loader = async ({ request }) => {
                 name
                 email
                 createdAt
+                updatedAt
                 lineItems(first: 10) {
                   edges {
                     node {
@@ -1286,6 +1287,8 @@ export default function Personnalisation() {
         Actualiser les articles
       </button>
 
+      <p className="pz-order-date">Devis classés par dernière modification Shopify, du plus récent au plus ancien.</p>
+
       <AttentionBanner proofs={proofsNeedingAttention} />
 
       {draftOrders.length === 0 && (
@@ -1327,7 +1330,11 @@ export default function Personnalisation() {
                   <s-stack direction="block" gap="small-200">
                     <s-heading>{order.name}</s-heading>
                     <p className="pz-order-date">
-                      Créé le {new Date(order.createdAt).toLocaleDateString("fr-FR")}
+                      Dernière modification du devis : {new Date(order.updatedAt).toLocaleString("fr-FR", {
+                        timeZone: "Europe/Paris",
+                        dateStyle: "short",
+                        timeStyle: "short",
+                      })}
                     </p>
                     <OrderProofSummary proofs={allOrderProofs} />
                   </s-stack>
