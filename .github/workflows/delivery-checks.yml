@@ -1,0 +1,69 @@
+name: Delivery module checks
+on:
+  push:
+    branches: [feature/delivery-notes-en]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  group: delivery-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: delivery_test
+          POSTGRES_PASSWORD: local_ci_only
+          POSTGRES_DB: delivery_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://delivery_test:local_ci_only@localhost:5432/delivery_test
+      SHOPIFY_API_KEY: ci-placeholder
+      SHOPIFY_API_SECRET: ci-placeholder-not-a-real-secret
+      SHOPIFY_APP_URL: https://example.test
+      RESEND_API_KEY: re_ci_placeholder_not_used
+      SCOPES: read_orders
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Resolve dependency lockfile
+        run: npm install --no-audit --no-fund
+      - name: Validate database migrations
+        run: npx prisma validate && npx prisma generate && npx prisma migrate deploy
+      - name: Unit and integration tests
+        run: node --test app/lib/*.test.js
+      - name: Production build
+        run: npm run build
+      - name: Preserve tested dependency lockfile
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/delivery-notes-en'
+        run: |
+          if ! git diff --quiet -- package-lock.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add package-lock.json
+            git commit -m 'Lock tested delivery module dependencies'
+            git push origin HEAD:feature/delivery-notes-en
+          fi
+      - name: Package review artifacts
+        if: always()
+        run: |
+          mkdir -p test-results
+          git archive --format=zip --output=test-results/source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: delivery-review-artifacts
+          path: test-results/
+          retention-days: 7
