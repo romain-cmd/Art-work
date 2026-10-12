@@ -1,132 +1,61 @@
-import { chromium } from "playwright";
-import { readFile, writeFile } from "node:fs/promises";
-import assert from "node:assert/strict";
-const fixture = JSON.parse(
-  await readFile("test-results/ui-fixture.json", "utf8"),
-);
-const browser = await chromium.launch({
-  headless: true,
-  ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
-    : {}),
-});
-const page = await browser.newPage({
-  viewport: { width: 390, height: 844 },
-  deviceScaleFactor: 1,
-  isMobile: true,
-  hasTouch: true,
-});
+import { chromium } from 'playwright';
+import { readFile, writeFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const fixture = JSON.parse(await readFile('test-results/ui-fixture.json', 'utf8'));
+const access = new URLSearchParams(new URL(fixture.link).hash.slice(1)).get('access');
+const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {}) });
+const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
 const errors = [];
-page.on("pageerror", (error) => errors.push(error.message));
+page.on('pageerror', error => errors.push(error.message));
 try {
   await page.goto(fixture.link);
-  await page.getByLabel("Access code").fill(fixture.pin);
-  await page.getByRole("button", { name: "Open my deliveries" }).click();
-  await page.getByRole("heading", { name: "My deliveries" }).waitFor();
-  await page.screenshot({
-    path: "test-results/mobile-deliveries.png",
-    fullPage: true,
-  });
+  await page.waitForFunction(() => document.querySelector('input[name="access"]')?.value.length === 64);
+  assert.equal(new URL(page.url()).search, '');
+  assert.equal(new URL(page.url()).hash, '');
+  await page.getByLabel('Access code').fill(fixture.pin);
+  await page.getByRole('button', { name: 'Open my deliveries' }).click();
+  await page.getByRole('heading', { name: 'My deliveries' }).waitFor();
+  await page.screenshot({ path: 'test-results/mobile-deliveries.png', fullPage: true });
   await page.goto(`http://localhost:3000/delivery?note=${fixture.noteId}`);
-  await page
-    .getByRole("heading", { name: "Check the items, then sign." })
-    .waitFor();
-  await page.getByLabel("Recipient full name").fill("Demo Recipient");
-  await page.getByLabel("Role / position").fill("Chief Stewardess");
-  const signature = page.getByRole("img", {
-    name: "Handwritten signature area",
-  });
+  await page.getByRole('heading', { name: 'Check the items, then sign.' }).waitFor();
+  await page.getByLabel('Recipient full name').fill('Demo Recipient');
+  await page.getByLabel('Role / position').fill('Chief Stewardess');
+  const signature = page.getByRole('img', { name: 'Handwritten signature area' });
   await signature.scrollIntoViewIfNeeded();
   const box = await signature.boundingBox();
-  assert.ok(
-    Math.abs(box.width / box.height - 8 / 3) < 0.05,
-    "Signature must use the same aspect ratio as its PDF representation",
-  );
-  await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.7);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.2, {
-    steps: 12,
-  });
-  await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.8, {
-    steps: 12,
-  });
-  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.4, {
-    steps: 12,
-  });
-  await page.mouse.up();
+  assert.ok(Math.abs(box.width / box.height - 8 / 3) < 0.05, 'Signature must use the same aspect ratio as its PDF representation');
+  const cdp = await page.context().newCDPSession(page);
+  const touchPoint = (x, y) => ({ x: box.x + box.width * x, y: box.y + box.height * y });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touchPoint(.1, .7)] });
+  for (const [x, y] of [[.15,.5],[.2,.3],[.25,.2],[.3,.4],[.35,.6],[.4,.8],[.5,.6],[.6,.5],[.7,.4]]) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPoint(x, y)] });
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   const drawn = await page.locator('input[name="strokes"]').inputValue();
-  assert.ok(JSON.parse(drawn)[0].length > 6);
+  assert.ok(JSON.parse(drawn)[0].length > 6, 'Touch input must record a full signature');
   await page.setViewportSize({ width: 844, height: 390 });
-  assert.equal(
-    await page.locator('input[name="strokes"]').inputValue(),
-    drawn,
-    "Rotation must preserve the signature",
-  );
+  assert.equal(await page.locator('input[name="strokes"]').inputValue(), drawn, 'Rotation must preserve the signature');
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({
-    path: "test-results/mobile-signature.png",
-    fullPage: true,
-  });
-  await page.getByRole("button", { name: "Clear signature" }).click();
-  assert.equal(await page.locator('input[name="strokes"]').inputValue(), "[]");
+  await page.screenshot({ path: 'test-results/mobile-signature.png', fullPage: true });
+  await page.getByRole('button', { name: 'Clear signature' }).click();
+  assert.equal(await page.locator('input[name="strokes"]').inputValue(), '[]');
   await page.context().setOffline(true);
-  await page
-    .getByRole("alert")
-    .filter({ hasText: "You are offline" })
-    .waitFor();
-  assert.ok(
-    await page
-      .getByRole("button", { name: "Confirm receipt & save signature" })
-      .isDisabled(),
-  );
+  await page.getByRole('alert').filter({ hasText: 'You are offline' }).waitFor();
+  assert.ok(await page.getByRole('button', { name: 'Confirm receipt & save signature' }).isDisabled());
   await page.context().setOffline(false);
   await page.goto(`http://localhost:3000/delivery?note=${fixture.signedId}`);
-  await page
-    .getByRole("heading", { name: "Thank you, Demo Recipient" })
-    .waitFor();
-  const download = await page.request.get(
-    `http://localhost:3000/delivery/pdf?note=${fixture.signedId}`,
-  );
-  assert.equal(download.status(), 200);
-  assert.match(download.headers()["content-type"], /application\/pdf/);
-  assert.equal((await download.body()).subarray(0, 5).toString(), "%PDF-");
+  await page.getByRole('heading', { name: 'Thank you, Demo Recipient' }).waitFor();
+  const download = await page.request.get(`http://localhost:3000/delivery/pdf?note=${fixture.signedId}`);
+  assert.equal(download.status(), 200); assert.match(download.headers()['content-type'], /application\/pdf/);
+  assert.equal((await download.body()).subarray(0,5).toString(), '%PDF-');
   await page.setViewportSize({ width: 820, height: 1180 });
-  await page.screenshot({
-    path: "test-results/tablet-receipt.png",
-    fullPage: true,
-  });
+  await page.screenshot({ path: 'test-results/tablet-receipt.png', fullPage: true });
   assert.deepEqual(errors, []);
-  await writeFile(
-    "test-results/browser-check.json",
-    JSON.stringify(
-      {
-        passed: true,
-        checks: [
-          "mobile login",
-          "assigned notes",
-          "signature drawing",
-          "signature proportions match PDF",
-          "rotation preserves strokes",
-          "clear signature",
-          "offline blocks submission",
-          "signed receipt",
-          "authenticated PDF download",
-        ],
-        pageErrors: errors,
-      },
-      null,
-      2,
-    ),
-  );
+  const serverLog = await readFile('test-results/server.log', 'utf8');
+  assert.ok(access && !serverLog.includes(access), 'The private access secret must not appear in HTTP request logs');
+  await writeFile('test-results/browser-check.json', JSON.stringify({ passed: true, checks: ['private fragment login', 'access secret absent from HTTP logs', 'assigned notes', 'touch signature drawing', 'signature proportions match PDF', 'rotation preserves strokes', 'clear signature', 'offline blocks submission', 'signed receipt', 'authenticated PDF download'], pageErrors: errors }, null, 2));
 } catch (error) {
-  await page
-    .screenshot({ path: "test-results/browser-failure.png", fullPage: true })
-    .catch(() => {});
-  await writeFile(
-    "test-results/browser-error.txt",
-    String(error.stack || error),
-  );
+  await page.screenshot({ path: 'test-results/browser-failure.png', fullPage: true }).catch(() => {});
+  await writeFile('test-results/browser-error.txt', String(error.stack || error));
   throw error;
-} finally {
-  await browser.close();
-}
+} finally { await browser.close(); }
