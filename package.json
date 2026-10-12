@@ -17,12 +17,11 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
-    "typecheck": "react-router typegen && tsc --noEmit"
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "test:deliveries": "node --test app/lib/delivery*.test.js"
   },
   "type": "module",
-  "engines": {
-    "node": ">=20.19 <22 || >=22.12"
-  },
+  "engines": { "node": ">=20.19 <22 || >=22.12" },
   "dependencies": {
     "@prisma/client": "^6.16.3",
     "@react-router/dev": "^7.12.0",
@@ -38,7 +37,8 @@
     "react-dom": "^18.3.1",
     "react-router": "^7.12.0",
     "resend": "^6.20.0",
-    "vite-tsconfig-paths": "^5.1.4"
+    "vite-tsconfig-paths": "^5.1.4",
+    "pdfmake": "0.2.20"
   },
   "devDependencies": {
     "@shopify/api-codegen-preset": "^1.2.0",
@@ -60,14 +60,8 @@
     "typescript": "^5.9.3",
     "vite": "^6.3.6"
   },
-  "workspaces": [
-    "extensions/*"
-  ],
-  "trustedDependencies": [
-    "@shopify/plugin-cloudflare"
-  ],
-  "overrides": {
-    "p-map": "^4.0.0"
-  },
+  "workspaces": ["extensions/*"],
+  "trustedDependencies": ["@shopify/plugin-cloudflare"],
+  "overrides": { "p-map": "^4.0.0" },
   "author": "conta"
 }

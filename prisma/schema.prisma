@@ -123,7 +123,6 @@ model PartnerEmail {
   shop  String
   type  String
   email String
-
   @@unique([shop, type])
 }
 
@@ -172,4 +171,87 @@ model ArtworkEvent {
   actor      String @default("Équipe")
   createdAt  DateTime @default(now())
   @@index([caseId, createdAt])
+}
+
+// Delivery documents are independent of artwork cases and draft orders.
+model DeliveryRepresentative {
+  id             String   @id @default(cuid())
+  shop           String
+  name           String
+  email          String?
+  accessHash     String   @unique
+  pinHash        String
+  isActive       Boolean  @default(true)
+  failedAttempts Int      @default(0)
+  lockedUntil    DateTime?
+  createdAt      DateTime @default(now())
+  notes          DeliveryNote[]
+  sessions       DeliverySession[]
+  @@index([shop, isActive])
+}
+
+model DeliverySession {
+  id               String   @id @default(cuid())
+  representativeId String
+  representative   DeliveryRepresentative @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  tokenHash        String   @unique
+  csrf             String
+  expiresAt        DateTime
+  createdAt        DateTime @default(now())
+  @@index([representativeId, expiresAt])
+}
+
+model DeliveryNote {
+  id                  String   @id @default(cuid())
+  number              Int      @unique @default(autoincrement())
+  shop                String
+  orderId             String
+  orderName           String
+  representativeId    String
+  representative      DeliveryRepresentative @relation(fields: [representativeId], references: [id])
+  status              String   @default("READY")
+  revision            Int      @default(1)
+  sourceHash          String
+  searchText          String   @default("")
+  snapshot            Json
+  createKey           String
+  createHash          String
+  signatureKey        String?
+  receipt             Json?
+  signedAt            DateTime?
+  proofHash           String?
+  emailTo             String?
+  emailFrom           String?
+  emailState          String   @default("NOT_REQUESTED")
+  emailFirstAttemptAt DateTime?
+  emailLockAt         DateTime?
+  emailSentAt         DateTime?
+  emailId             String?
+  emailError          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  document            DeliveryDocument?
+  events              DeliveryEvent[]
+  @@unique([shop, createKey])
+  @@index([shop, orderId, status])
+  @@index([representativeId, status, createdAt])
+}
+
+model DeliveryDocument {
+  noteId    String   @id
+  note      DeliveryNote @relation(fields: [noteId], references: [id])
+  pdf       Bytes
+  sha256    String
+  createdAt DateTime @default(now())
+}
+
+model DeliveryEvent {
+  id        String   @id @default(cuid())
+  noteId    String
+  note      DeliveryNote @relation(fields: [noteId], references: [id])
+  actor     String
+  kind      String
+  details   Json?
+  createdAt DateTime @default(now())
+  @@index([noteId, createdAt])
 }
