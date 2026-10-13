@@ -111,29 +111,35 @@ export async function voidDeliveryNote(db, shop, id, actor, reason) {
     });
   });
 }
-export async function signDeliveryNote(db, admin, session, id, input) {
+async function signWithAuthorization(db, admin, auth, id, input) {
   requestKey(input.signatureKey);
-  const rep = session.representative;
+  const { shop } = auth;
   return transaction(db, async (tx) => {
     const original = await tx.deliveryNote.findFirst({
-      where: { id, shop: rep.shop, representativeId: rep.id },
-    });
-    if (!original) throw new DeliveryError("Delivery note not found.", 404);
-    await lockOrder(tx, rep.shop, original.orderId);
-    const note = await tx.deliveryNote.findUnique({ where: { id } });
-    const validSession = await tx.deliverySession.findFirst({
       where: {
-        id: session.id,
-        representativeId: rep.id,
-        expiresAt: { gt: new Date() },
-        representative: { isActive: true },
+        id,
+        shop,
+        ...(auth.type === "mobile" ? { representativeId: auth.representativeId } : {}),
       },
     });
-    if (!validSession)
-      throw new DeliveryError(
-        "Your access has expired or been revoked. Sign in again.",
-        403,
-      );
+    if (!original) throw new DeliveryError("Delivery note not found.", 404);
+    await lockOrder(tx, shop, original.orderId);
+    const note = await tx.deliveryNote.findUnique({ where: { id } });
+    if (auth.type === "mobile") {
+      const validSession = await tx.deliverySession.findFirst({
+        where: {
+          id: auth.session.id,
+          representativeId: auth.representativeId,
+          expiresAt: { gt: new Date() },
+          representative: { isActive: true },
+        },
+      });
+      if (!validSession)
+        throw new DeliveryError(
+          "Your access has expired or been revoked. Sign in again.",
+          403,
+        );
+    }
     if (note.status === "SIGNED") {
       if (note.signatureKey === input.signatureKey) return note;
       throw new DeliveryError(
@@ -157,7 +163,7 @@ export async function signDeliveryNote(db, admin, session, id, input) {
       statement: RECEIPT_STATEMENT,
       strokes: validateStrokes(input.strokes),
       signedAt: new Date().toISOString(),
-      representativeId: rep.id,
+      representativeId: note.representativeId,
     };
     const emailTo =
       input.sendEmail === "yes" ? email(input.emailTo, true) : null;
@@ -169,7 +175,7 @@ export async function signDeliveryNote(db, admin, session, id, input) {
       );
     const otherNotes = await tx.deliveryNote.findMany({
       where: {
-        shop: rep.shop,
+        shop,
         orderId: note.orderId,
         status: { in: ["READY", "SIGNED"] },
       },
@@ -206,7 +212,7 @@ export async function signDeliveryNote(db, admin, session, id, input) {
         signatureKey: input.signatureKey,
         emailTo,
         emailFrom: getFromAddress(),
-        emailState: emailTo ? "PENDING" : "NOT_REQUESTED",
+        emailState: "PENDING",
       },
     });
     await tx.deliveryDocument.create({
@@ -215,19 +221,46 @@ export async function signDeliveryNote(db, admin, session, id, input) {
     await tx.deliveryEvent.create({
       data: {
         noteId: id,
-        actor: rep.name,
+        actor: auth.actor,
         kind: "SIGNED",
         details: {
           proofHash,
           pdfHash: digest(pdf),
           sourceHash: note.sourceHash,
           verifiedAgainstShopifyAt: new Date().toISOString(),
-          sessionId: session.id,
+          sessionId: auth.type === "mobile" ? auth.session.id : null,
+          channel: auth.type === "mobile" ? "MOBILE" : "SHOPIFY_ADMIN",
         },
       },
     });
     return signed;
   });
+}
+export async function signDeliveryNote(db, admin, session, id, input) {
+  return signWithAuthorization(
+    db,
+    admin,
+    {
+      type: "mobile",
+      shop: session.representative.shop,
+      representativeId: session.representative.id,
+      actor: session.representative.name,
+      session,
+    },
+    id,
+    input,
+  );
+}
+
+// Called exclusively after authenticate.admin() in the embedded Shopify route.
+export async function signDeliveryNoteFromAdmin(db, admin, shop, id, input) {
+  return signWithAuthorization(
+    db,
+    admin,
+    { type: "admin", shop, actor: "Shopify administrator" },
+    id,
+    { ...input, sendEmail: "no", emailTo: "" },
+  );
 }
 export async function deliveryDocument(db, shop, id, representativeId) {
   const document = await db.deliveryDocument.findFirst({
