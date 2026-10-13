@@ -232,6 +232,14 @@ export async function action({ request }) {
     );
   }
 }
+// Delivery quantity fields remain editable: bulk actions only prefill their values.
+function fillDeliveryQuantities(event, selectAll) {
+  const form = event.currentTarget.closest("form");
+  if (!form) return;
+  form.querySelectorAll('input[data-delivery-quantity]').forEach((input) => {
+    if (!input.disabled) input.value = selectAll ? input.max : "0";
+  });
+}
 export default function Deliveries() {
   const view = useLoaderData(),
     result = useActionData(),
@@ -532,6 +540,31 @@ export default function Deliveries() {
                 />
               </label>
             </div>
+            <div className="delivery-toolbar">
+              <div>
+                <strong>Products to deliver</strong>
+                <p className="delivery-muted">
+                  Select all remaining quantities for a complete delivery, or
+                  adjust each line below for a partial delivery.
+                </p>
+              </div>
+              <div className="delivery-actions">
+                <button
+                  type="button"
+                  className="delivery-button secondary"
+                  onClick={(event) => fillDeliveryQuantities(event, true)}
+                >
+                  Select all available
+                </button>
+                <button
+                  type="button"
+                  className="delivery-button secondary"
+                  onClick={(event) => fillDeliveryQuantities(event, false)}
+                >
+                  Clear quantities
+                </button>
+              </div>
+            </div>
             <div className="delivery-table-wrap">
               <table>
                 <thead>
@@ -560,6 +593,7 @@ export default function Deliveries() {
                         <input
                           aria-label={`Quantity to deliver: ${i.title} ${i.variantTitle}`}
                           name={`quantity:${i.id}`}
+                          data-delivery-quantity
                           type="number"
                           min={0}
                           max={i.available}
