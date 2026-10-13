@@ -484,6 +484,13 @@
 .delivery-signature-action { font-size: 12px; margin-top: 10px; color: #627084; }
 .delivery-signature-preview { width: 100%; max-width: 460px; height: 110px; }
 .delivery-signature-overlay {
+  /* The dialog is portaled to document.body, outside .delivery-app. */
+  /* Re-declare its design tokens so primary buttons remain visible. */
+  --ink: #102b46;
+  --muted: #627084;
+  --line: #dce3e9;
+  --paper: #fff;
+  box-sizing: border-box;
   position: fixed;
   inset: 0;
   z-index: 2147483000;
@@ -532,4 +539,14 @@
 @media (max-width: 520px) {
   .delivery-signature-header h2 { font-size: 17px; }
   .delivery-signature-footer .delivery-button { flex: 1; padding: 10px 8px; }
+}
+
+/* Keep the confirmation action legible even in host-app themes. */
+.delivery-signature-footer .delivery-button:not(.secondary) {
+  background-color: #102b46;
+  border-color: #102b46;
+  color: #fff !important;
+}
+.delivery-signature-footer .delivery-button:not(.secondary):disabled {
+  opacity: 0.55;
 }
