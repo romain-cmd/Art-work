@@ -41,62 +41,89 @@ try {
     .waitFor();
   await page.getByLabel("Recipient full name").fill("Demo Recipient");
   await page.getByLabel("Role / position").fill("Chief Stewardess");
-  const signature = page.getByRole("img", {
-    name: "Handwritten signature area",
-  });
-  await signature.scrollIntoViewIfNeeded();
-  const box = await signature.boundingBox();
-  assert.ok(
-    Math.abs(box.width / box.height - 8 / 3) < 0.05,
-    "Signature must use the same aspect ratio as its PDF representation",
+  const savedInput = page.locator('input[name="strokes"]');
+  assert.equal(await savedInput.inputValue(), "[]");
+  await page.getByRole("button", { name: /Tap here to sign in full screen/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign for delivery" });
+  await dialog.waitFor();
+  assert.equal(
+    await page.evaluate(() => document.body.style.overflow),
+    "hidden",
+    "The page must not scroll while the signature pad is open",
   );
+  const signature = page.getByRole("img", { name: "Draw your signature here" });
+  const box = await signature.boundingBox();
+  assert.ok(box.width > 300 && box.height > 350,
+    "The signature pad must use most of the mobile viewport");
   const cdp = await page.context().newCDPSession(page);
   const touchPoint = (x, y) => ({
     x: box.x + box.width * x,
     y: box.y + box.height * y,
   });
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchStart",
-    touchPoints: [touchPoint(0.1, 0.7)],
-  });
-  for (const [x, y] of [
-    [0.15, 0.5],
-    [0.2, 0.3],
-    [0.25, 0.2],
-    [0.3, 0.4],
-    [0.35, 0.6],
-    [0.4, 0.8],
-    [0.5, 0.6],
-    [0.6, 0.5],
-    [0.7, 0.4],
-  ]) {
+  const drawSignature = async () => {
     await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [touchPoint(x, y)],
+      type: "touchStart",
+      touchPoints: [touchPoint(0.1, 0.7)],
     });
-  }
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchEnd",
-    touchPoints: [],
-  });
-  const drawn = await page.locator('input[name="strokes"]').inputValue();
-  assert.ok(
-    JSON.parse(drawn)[0].length > 6,
-    "Touch input must record a full signature",
-  );
+    for (const [x, y] of [
+      [0.15, 0.5],
+      [0.2, 0.3],
+      [0.25, 0.2],
+      [0.3, 0.4],
+      [0.35, 0.6],
+      [0.4, 0.8],
+      [0.5, 0.6],
+      [0.6, 0.5],
+      [0.7, 0.4],
+    ]) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [touchPoint(x, y)],
+      });
+    }
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  };
+  await drawSignature();
+  assert.equal(await savedInput.inputValue(), "[]",
+    "Drawing must not commit a signature before confirmation");
+  await page.getByRole("button", { name: "Cancel" }).last().click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await savedInput.inputValue(), "[]",
+    "Cancel must discard unconfirmed strokes");
+  assert.equal(await page.evaluate(() => document.body.style.overflow), "",
+    "Closing the pad must restore page scrolling");
+  await page.getByRole("button", { name: /Tap here to sign in full screen/ }).click();
+  await drawSignature();
+  await page.getByRole("button", { name: "Clear" }).click();
+  assert.equal(await page.getByRole("button", { name: "Confirm signature" }).isDisabled(), true);
+  await drawSignature();
+  await page.getByRole("button", { name: "Confirm signature" }).click();
+  await dialog.waitFor({ state: "hidden" });
+  const drawn = await savedInput.inputValue();
+  assert.ok(JSON.parse(drawn)[0].length > 6,
+    "Confirmed touch input must record a complete signature");
   await page.setViewportSize({ width: 844, height: 390 });
-  assert.equal(
-    await page.locator('input[name="strokes"]').inputValue(),
-    drawn,
-    "Rotation must preserve the signature",
-  );
+  assert.equal(await savedInput.inputValue(), drawn,
+    "Rotation must preserve the confirmed signature");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({
     path: "test-results/mobile-signature.png",
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Clear signature" }).click();
-  assert.equal(await page.locator('input[name="strokes"]').inputValue(), "[]");
+  await page.getByRole("button", { name: /Edit signature/ }).click();
+  await dialog.waitFor();
+  await page.getByRole("button", { name: "Clear" }).click();
+  await page.getByRole("button", { name: "Cancel" }).last().click();
+  assert.equal(await savedInput.inputValue(), drawn,
+    "Cancel after editing must retain the previous confirmed signature");
+  await page.getByRole("button", { name: /Edit signature/ }).click();
+  await page.getByRole("button", { name: "Clear" }).click();
+  await drawSignature();
+  await page.getByRole("button", { name: "Confirm signature" }).click();
+  assert.ok(JSON.parse(await savedInput.inputValue()).length > 0);
   await page.context().setOffline(true);
   await page
     .getByRole("alert")
@@ -138,10 +165,12 @@ try {
           "private fragment login",
           "access secret absent from HTTP logs",
           "assigned notes",
-          "touch signature drawing",
-          "signature proportions match PDF",
+          "fullscreen touch signature drawing",
+          "body scroll locked during signing",
+          "cancel discards draft signature",
+          "confirm saves signature",
           "rotation preserves strokes",
-          "clear signature",
+          "clear and edit signature",
           "offline blocks submission",
           "signed receipt",
           "authenticated PDF download",
