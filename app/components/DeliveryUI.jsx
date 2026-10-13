@@ -1,5 +1,5 @@
 /* eslint-disable react/prop-types */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 export function DeliveryShell({ children, mobile = false }) {
   return (
     <main className={`delivery-app${mobile ? " mobile" : ""}`}>
@@ -112,10 +112,60 @@ export function DeliverySummary({ snapshot }) {
   );
 }
 export function SignaturePad() {
-  const svg = useRef(null),
-    paths = useRef([]),
-    active = useRef(null);
-  const [strokes, setStrokes] = useState([]);
+  const svg = useRef(null);
+  const active = useRef(null);
+  const dialog = useRef(null);
+  const openButton = useRef(null);
+  const draftRef = useRef([]);
+  const [draft, setDraft] = useState([]);
+  const [saved, setSaved] = useState([]);
+  const [open, setOpen] = useState(false);
+
+  function redraw() {
+    setDraft(draftRef.current.map((stroke) => [...stroke]));
+  }
+  function showPad() {
+    if (document.activeElement instanceof HTMLElement)
+      document.activeElement.blur();
+    draftRef.current = saved.map((stroke) => [...stroke]);
+    redraw();
+    setOpen(true);
+  }
+  function closePad() {
+    active.current = null;
+    setOpen(false);
+    openButton.current?.focus();
+  }
+  function confirmPad() {
+    const points = draftRef.current.flat();
+    const span = (axis) =>
+      Math.max(...points.map((p) => p[axis])) -
+      Math.min(...points.map((p) => p[axis]));
+    if (points.length < 6 || span(0) + span(1) < 0.04) return;
+    setSaved(draftRef.current.map((stroke) => [...stroke]));
+    closePad();
+  }
+  useEffect(() => {
+    if (!open) return;
+    const oldBodyOverflow = document.body.style.overflow;
+    const oldHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    dialog.current?.focus();
+    const escape = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePad();
+      }
+    };
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.body.style.overflow = oldBodyOverflow;
+      document.documentElement.style.overflow = oldHtmlOverflow;
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
   function point(event) {
     const rect = svg.current.getBoundingClientRect();
     return [
@@ -123,94 +173,128 @@ export function SignaturePad() {
       Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
     ].map((n) => Math.round(n * 10000) / 10000);
   }
-  function refresh() {
-    setStrokes(paths.current.map((stroke) => [...stroke]));
-  }
   function start(event) {
     if (
       event.isPrimary === false ||
       event.button !== 0 ||
       active.current !== null ||
-      paths.current.length >= 100
-    )
-      return;
+      draftRef.current.length >= 100
+    ) return;
     event.preventDefault();
     active.current = event.pointerId;
     svg.current.setPointerCapture(event.pointerId);
-    paths.current.push([point(event)]);
-    refresh();
+    draftRef.current.push([point(event)]);
+    redraw();
   }
   function move(event) {
-    if (
-      active.current !== event.pointerId ||
-      paths.current.reduce((sum, p) => sum + p.length, 0) >= 6000
-    )
-      return;
+    if (active.current !== event.pointerId) return;
     event.preventDefault();
-    paths.current.at(-1).push(point(event));
-    refresh();
+    if (draftRef.current.reduce((sum, stroke) => sum + stroke.length, 0) >= 6000)
+      return;
+    draftRef.current.at(-1).push(point(event));
+    redraw();
   }
   function end(event) {
     if (active.current !== event.pointerId) return;
-    if (event.type === "pointercancel" || paths.current.at(-1).length < 2)
-      paths.current.pop();
+    if (event.type === "pointercancel" || draftRef.current.at(-1).length < 2)
+      draftRef.current.pop();
     active.current = null;
-    refresh();
+    redraw();
   }
+  const valid = (() => {
+    const points = draft.flat();
+    if (points.length < 6) return false;
+    const span = (axis) =>
+      Math.max(...points.map((p) => p[axis])) -
+      Math.min(...points.map((p) => p[axis]));
+    return span(0) + span(1) >= 0.04;
+  })();
+  const drawPaths = (strokes) =>
+    strokes.map((stroke, i) => (
+      <path
+        key={i}
+        d={stroke
+          .map((p, n) => `${n ? "L" : "M"}${p[0] * 800} ${p[1] * 300}`)
+          .join(" ")}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    ));
   return (
     <div className="signature-field">
-      <div className="delivery-card-heading">
-        <label htmlFor="signature-input">
-          Recipient signature <span aria-hidden="true">*</span>
-        </label>
-        <button
-          type="button"
-          className="delivery-button secondary compact"
-          onClick={() => {
-            paths.current = [];
-            active.current = null;
-            refresh();
-          }}
-        >
-          Clear signature
-        </button>
-      </div>
-      <p id="signature-help" className="delivery-muted">
-        Sign with your finger, a stylus or a mouse inside the area below.
-      </p>
-      <svg
-        ref={svg}
-        viewBox="0 0 800 300"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label="Handwritten signature area"
-        aria-describedby="signature-help"
-        onPointerDown={start}
-        onPointerMove={move}
-        onPointerUp={end}
-        onPointerCancel={end}
-        className="signature-pad"
+      <label id="signature-label">
+        Recipient signature <span aria-hidden="true">*</span>
+      </label>
+      <button
+        ref={openButton}
+        type="button"
+        className="delivery-signature-trigger"
+        onClick={showPad}
+        aria-describedby="signature-label"
       >
-        {strokes.map((s, i) => (
-          <path
-            key={i}
-            d={s
-              .map((p, n) => `${n ? "L" : "M"}${p[0] * 800} ${p[1] * 300}`)
-              .join(" ")}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        ))}
-      </svg>
-      <input
-        id="signature-input"
-        type="hidden"
-        name="strokes"
-        value={JSON.stringify(strokes)}
-      />
+        {saved.length ? (
+          <svg viewBox="0 0 800 300" preserveAspectRatio="xMidYMid meet"
+            className="delivery-signature-preview" aria-label="Saved signature">
+            {drawPaths(saved)}
+          </svg>
+        ) : (
+          <span className="delivery-signature-placeholder">
+            Tap here to sign in full screen
+          </span>
+        )}
+        <span className="delivery-signature-action">
+          {saved.length ? "Edit signature" : "Open signature pad"}
+        </span>
+      </button>
+      <input id="signature-input" type="hidden" name="strokes"
+        value={JSON.stringify(saved)} />
+      {open && (
+        <div className="delivery-signature-overlay" role="presentation">
+          <section
+            ref={dialog}
+            className="delivery-signature-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="signature-dialog-title"
+            tabIndex={-1}
+          >
+            <header className="delivery-signature-header">
+              <div>
+                <h2 id="signature-dialog-title">Sign for delivery</h2>
+                <p>Use your finger or stylus in the white area below.</p>
+              </div>
+              <button type="button" className="delivery-button secondary compact"
+                onClick={closePad}>Cancel</button>
+            </header>
+            <div className="delivery-signature-canvas">
+              <svg ref={svg} viewBox="0 0 800 300" preserveAspectRatio="none"
+                role="img" aria-label="Draw your signature here"
+                className="signature-pad delivery-signature-fullpad"
+                onPointerDown={start} onPointerMove={move}
+                onPointerUp={end} onPointerCancel={end}>
+                {drawPaths(draft)}
+              </svg>
+            </div>
+            <footer className="delivery-signature-footer">
+              <button type="button" className="delivery-button secondary"
+                onClick={() => {
+                  draftRef.current = [];
+                  active.current = null;
+                  redraw();
+                }}>Clear</button>
+              <button type="button" className="delivery-button secondary"
+                onClick={closePad}>Cancel</button>
+              <button type="button" className="delivery-button"
+                disabled={!valid} onClick={confirmPad}>
+                Confirm signature
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
