@@ -12,6 +12,7 @@ import {
   createDeliveryNote,
   deliveryDocument,
   signDeliveryNote,
+  signDeliveryNoteFromAdmin,
   voidDeliveryNote,
 } from "./delivery-notes.server.js";
 import { sendDeliveryEmail } from "./delivery-email.server.js";
@@ -217,6 +218,61 @@ test(
           );
           await mkdir("test-results", { recursive: true });
           await writeFile("test-results/delivery-example.pdf", file.pdf);
+        },
+      );
+      await t.test(
+        "Shopify office signature archives a private PDF and emails the office",
+        async () => {
+          const f = await prepare(2);
+          const input = signatureInput(f.note);
+          const signed = await signDeliveryNoteFromAdmin(
+            db,
+            f.admin,
+            shop,
+            f.note.id,
+            input,
+          );
+          assert.equal(signed.status, "SIGNED");
+          assert.equal(signed.emailState, "PENDING");
+          assert.equal(signed.emailTo, null);
+          assert.equal(
+            await db.deliveryDocument.count({ where: { noteId: f.note.id } }),
+            1,
+          );
+          const events = await db.deliveryEvent.findMany({
+            where: { noteId: f.note.id, kind: "SIGNED" },
+          });
+          assert.equal(events.length, 1);
+          assert.equal(events[0].details.channel, "SHOPIFY_ADMIN");
+          assert.equal(events[0].details.sessionId, null);
+          const repeat = await signDeliveryNoteFromAdmin(
+            db,
+            f.admin,
+            shop,
+            f.note.id,
+            input,
+          );
+          assert.equal(repeat.proofHash, signed.proofHash);
+          let sent = 0;
+          await sendDeliveryEmail(db, shop, f.note.id, async (payload) => {
+            sent++;
+            assert.deepEqual(payload.to, [
+              process.env.DELIVERY_NOTIFICATION_EMAIL || "romain@marinayachtwear.com",
+            ]);
+            assert.equal(payload.attachments.length, 1);
+            assert.ok(payload.attachments[0].content.subarray(0, 5).toString() === "%PDF-");
+            return "office-message-id";
+          });
+          assert.equal(sent, 1);
+          assert.equal(
+            (await db.deliveryNote.findUnique({ where: { id: f.note.id } }))
+              .emailState,
+            "SENT",
+          );
+          await assert.rejects(
+            signDeliveryNoteFromAdmin(db, f.admin, "wrong-shop.myshopify.com", f.note.id, input),
+            (e) => e.status === 404,
+          );
         },
       );
       await t.test(
