@@ -3,7 +3,6 @@ const ORDER = `#graphql
 query DeliveryOrder($id: ID!, $after: String) {
   order(id: $id) {
     id name updatedAt cancelledAt email
-    customer { displayName }
     customAttributes { key value }
     shippingAddress { name company address1 address2 city zip province country }
     lineItems(first: 100, after: $after) {
