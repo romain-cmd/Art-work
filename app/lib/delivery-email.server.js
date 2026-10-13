@@ -59,7 +59,7 @@ export async function sendDeliveryEmail(db, shop, id, send = sendWithResend) {
   try {
     const document = await deliveryDocument(db, shop, id);
     const officeEmail = process.env.DELIVERY_NOTIFICATION_EMAIL || "romain@marinayachtwear.com";
-    const recipients = [...new Set([officeEmail, note.emailTo].filter(Boolean))];
+    const recipients = [...new Set([note.emailTo, officeEmail].filter(Boolean))];
     const emailId = await send(
       {
         from: note.emailFrom,
