@@ -19,7 +19,6 @@ export async function sendDeliveryEmail(db, shop, id, send = sendWithResend) {
   });
   if (
     !note ||
-    !note.emailTo ||
     ["SENT", "NOT_REQUESTED", "MANUAL_REVIEW"].includes(note.emailState)
   )
     return;
@@ -59,10 +58,12 @@ export async function sendDeliveryEmail(db, shop, id, send = sendWithResend) {
   if (!claim.count) return;
   try {
     const document = await deliveryDocument(db, shop, id);
+    const officeEmail = process.env.DELIVERY_NOTIFICATION_EMAIL || "romain@marinayachtwear.com";
+    const recipients = [...new Set([officeEmail, note.emailTo].filter(Boolean))];
     const emailId = await send(
       {
         from: note.emailFrom,
-        to: [note.emailTo],
+        to: recipients,
         subject: `Your signed delivery note ${note.snapshot.documentNumber} | Marina Yacht Wear`,
         text: `Hello ${note.receipt.name},\n\nPlease find attached your signed delivery note for order ${note.orderName}.\n\nThis document confirms the items and quantities received, together with any recorded reservations. It is not a payment receipt.\n\nThank you,\nMarina Yacht Wear`,
         attachments: [{ filename: document.filename, content: document.pdf }],
