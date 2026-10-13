@@ -1,5 +1,6 @@
 /* eslint-disable react/prop-types */
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 export function DeliveryShell({ children, mobile = false }) {
   return (
     <main className={`delivery-app${mobile ? " mobile" : ""}`}>
@@ -134,7 +135,6 @@ export function SignaturePad() {
   function closePad() {
     active.current = null;
     setOpen(false);
-    openButton.current?.focus();
   }
   function confirmPad() {
     const points = draftRef.current.flat();
@@ -147,22 +147,71 @@ export function SignaturePad() {
   }
   useEffect(() => {
     if (!open) return;
-    const oldBodyOverflow = document.body.style.overflow;
-    const oldHtmlOverflow = document.documentElement.style.overflow;
-    document.body.style.overflow = "hidden";
-    document.documentElement.style.overflow = "hidden";
-    dialog.current?.focus();
-    const escape = (event) => {
+    // overflow:hidden alone does not stop iOS Safari's rubber-band scrolling.
+    // Freeze the document at its exact position while the signing layer is open.
+    const root = document.documentElement;
+    const body = document.body;
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    const bodyStyles = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+      overflow: body.style.overflow,
+      touchAction: body.style.touchAction,
+      overscrollBehavior: body.style.overscrollBehavior,
+    };
+    const rootStyles = {
+      overflow: root.style.overflow,
+      touchAction: root.style.touchAction,
+      overscrollBehavior: root.style.overscrollBehavior,
+    };
+    Object.assign(body.style, {
+      position: "fixed",
+      top: `-${scrollY}px`,
+      left: `-${scrollX}px`,
+      right: "0",
+      width: "100%",
+      overflow: "hidden",
+      touchAction: "none",
+      overscrollBehavior: "none",
+    });
+    Object.assign(root.style, {
+      overflow: "hidden",
+      touchAction: "none",
+      overscrollBehavior: "none",
+    });
+    // Non-passive native listeners also prevent scrolling inside Shopify's
+    // embedded webview and older Safari versions that ignore touch-action.
+    const blockGesture = (event) => {
+      if (event.cancelable) event.preventDefault();
+    };
+    const onKeyDown = (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
         closePad();
       }
     };
-    document.addEventListener("keydown", escape);
+    document.addEventListener("touchmove", blockGesture, {
+      capture: true,
+      passive: false,
+    });
+    document.addEventListener("wheel", blockGesture, {
+      capture: true,
+      passive: false,
+    });
+    document.addEventListener("keydown", onKeyDown);
+    dialog.current?.focus({ preventScroll: true });
     return () => {
-      document.body.style.overflow = oldBodyOverflow;
-      document.documentElement.style.overflow = oldHtmlOverflow;
-      document.removeEventListener("keydown", escape);
+      document.removeEventListener("touchmove", blockGesture, true);
+      document.removeEventListener("wheel", blockGesture, true);
+      document.removeEventListener("keydown", onKeyDown);
+      Object.assign(body.style, bodyStyles);
+      Object.assign(root.style, rootStyles);
+      window.scrollTo(scrollX, scrollY);
+      openButton.current?.focus({ preventScroll: true });
     };
   }, [open]);
 
@@ -251,7 +300,7 @@ export function SignaturePad() {
       </button>
       <input id="signature-input" type="hidden" name="strokes"
         value={JSON.stringify(saved)} />
-      {open && (
+      {open && createPortal(
         <div className="delivery-signature-overlay" role="presentation">
           <section
             ref={dialog}
@@ -293,7 +342,8 @@ export function SignaturePad() {
               </button>
             </footer>
           </section>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
