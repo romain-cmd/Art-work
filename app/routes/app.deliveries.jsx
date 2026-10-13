@@ -28,9 +28,11 @@ import {
   createDeliveryNote,
   deliveryDocument,
   noteView,
+  signDeliveryNoteFromAdmin,
   voidDeliveryNote,
 } from "../lib/delivery-notes.server.js";
 import { sendDeliveryEmail } from "../lib/delivery-email.server.js";
+import { RECEIPT_STATEMENT } from "../lib/delivery-shared.js";
 import {
   loadDeliveryOrder,
   searchDeliveryOrders,
@@ -38,6 +40,7 @@ import {
 import {
   DeliveryShell,
   DeliverySummary,
+  SignaturePad,
   SignedReceipt,
   Status,
 } from "../components/DeliveryUI.jsx";
@@ -65,6 +68,7 @@ export async function loader({ request }) {
     });
     if (!note) throw new Response("Delivery note not found.", { status: 404 });
     result.note = noteView(note);
+    result.signatureKey = randomUUID();
   } else if (orderId) {
     const order = await loadDeliveryOrder(admin, orderId);
     const notes = await db.deliveryNote.findMany({
@@ -159,6 +163,31 @@ export async function action({ request }) {
         },
       );
       return redirect(`/app/deliveries?note=${note.id}`);
+    }
+    if (intent === "sign") {
+      let strokes;
+      try {
+        strokes = JSON.parse(form.get("strokes") || "[]");
+      } catch {
+        throw new DeliveryError("Invalid signature. Please sign again.");
+      }
+      const note = await signDeliveryNoteFromAdmin(
+        db,
+        admin,
+        shop,
+        form.get("noteId"),
+        {
+          signatureKey: form.get("signatureKey"),
+          revision: form.get("revision"),
+          name: form.get("name"),
+          role: form.get("role"),
+          reservations: form.get("reservations"),
+          agreed: form.get("agreed"),
+          strokes,
+        },
+      );
+      await sendDeliveryEmail(db, shop, note.id);
+      return redirect(`/app/deliveries?note=${encodeURIComponent(note.id)}`);
     }
     if (intent === "void") {
       await voidDeliveryNote(
@@ -357,6 +386,37 @@ export default function Deliveries() {
                 <br />
                 <code>{view.note.proofHash}</code>
               </p>
+            </section>
+          )}
+          {view.note.status === "READY" && (
+            <section className="delivery-card">
+              <h2>Sign directly in Shopify</h2>
+              <p>Hand this device to the recipient to review the items and sign with a finger or stylus. A signed PDF will be archived and automatically emailed to the office.</p>
+              <Form method="post">
+                <input type="hidden" name="intent" value="sign" />
+                <input type="hidden" name="noteId" value={view.note.id} />
+                <input type="hidden" name="revision" value={view.note.revision} />
+                <input type="hidden" name="signatureKey" value={view.signatureKey} />
+                <div className="delivery-fields">
+                  <label>Recipient full name *
+                    <input name="name" maxLength={120} required autoComplete="off" />
+                  </label>
+                  <label>Role / position *
+                    <input name="role" maxLength={120} required autoComplete="off" placeholder="e.g. Chief Stewardess" />
+                  </label>
+                </div>
+                <label>Reservations or comments
+                  <textarea name="reservations" maxLength={2000} />
+                </label>
+                <SignaturePad />
+                <label className="delivery-check">
+                  <input type="checkbox" name="agreed" value="yes" required />
+                  <span>{RECEIPT_STATEMENT}</span>
+                </label>
+                <button className="delivery-button delivery-submit" disabled={busy}>
+                  {busy ? "Recording signed receipt..." : "Confirm receipt & save signature"}
+                </button>
+              </Form>
             </section>
           )}
           {view.note.status === "READY" && (
