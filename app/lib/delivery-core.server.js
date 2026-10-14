@@ -138,6 +138,17 @@ export function availableItems(order, notes, excludeId) {
       };
     });
 }
+// Summarize only MYW OrderFlow delivery notes, not external Shopify fulfillments.
+export function deliveryProgress(order, notes) {
+  const lines = availableItems(order, notes);
+  const total = lines.reduce((sum, line) => sum + line.quantity, 0);
+  const signed = lines.reduce((sum, line) => sum + line.signed, 0);
+  const reserved = lines.reduce((sum, line) => sum + line.reserved, 0);
+  const available = lines.reduce((sum, line) => sum + line.available, 0);
+  const percent = total > 0 ? Math.min(100, Math.round((signed / total) * 100)) : 0;
+  const status = total === 0 ? "empty" : signed >= total ? "complete" : signed > 0 ? "partial" : reserved > 0 ? "prepared" : "not_started";
+  return { lines, total, signed, reserved, available, percent, status, exceedsOrder: signed + reserved > total };
+}
 export function makeSnapshot(
   order,
   notes,
