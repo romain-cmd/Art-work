@@ -4,6 +4,7 @@ import {
   availableItems,
   credentials,
   DeliveryError,
+  deliveryProgress,
   digest,
   email,
   integer,
@@ -58,6 +59,31 @@ test("ready notes reserve quantities and signed notes remain deducted", () => {
       .available,
     10,
   );
+});
+test("order delivery progress distinguishes signed, reserved and available quantities", () => {
+  const snapshot = make();
+  const p = deliveryProgress(order, [
+    { id: "signed", status: "SIGNED", snapshot },
+    { id: "reserved", status: "READY", snapshot },
+    { id: "void", status: "VOID", snapshot },
+  ]);
+  assert.equal(p.signed, 3);
+  assert.equal(p.reserved, 3);
+  assert.equal(p.available, 8);
+  assert.equal(p.total, 14);
+  assert.equal(p.percent, 21);
+  assert.equal(p.status, "partial");
+  assert.equal(p.lines[0].signed, 3);
+  assert.equal(p.lines[0].reserved, 3);
+});
+test("progress reports complete, prepared and empty orders correctly", () => {
+  const full = make({ ...input, quantities: { [order.items[0].id]: 10, [order.items[1].id]: 4 } });
+  assert.equal(deliveryProgress(order, [{ id: "signed", status: "SIGNED", snapshot: full }]).status, "complete");
+  assert.equal(deliveryProgress(order, [{ id: "ready", status: "READY", snapshot: full }]).status, "prepared");
+  assert.equal(deliveryProgress(order, []).status, "not_started");
+  const empty = { ...order, items: [] };
+  const p = deliveryProgress(empty, []);
+  assert.deepEqual({ total: p.total, percent: p.percent, status: p.status }, { total: 0, percent: 0, status: "empty" });
 });
 test("over-allocation, empty selection, unknown items and fractional values fail closed", () => {
   for (const quantities of [

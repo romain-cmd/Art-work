@@ -20,6 +20,7 @@ import {
 } from "../lib/delivery-access.server.js";
 import {
   availableItems,
+  deliveryProgress,
   DeliveryError,
   orderHash,
   text,
@@ -77,6 +78,12 @@ export async function loader({ request }) {
     result.order = order;
     result.sourceHash = orderHash(order);
     result.items = availableItems(order, notes);
+    result.progress = deliveryProgress(order, notes);
+    result.deliveryNotes = await db.deliveryNote.findMany({
+      where: { shop, orderId },
+      select: { id: true, status: true, snapshot: true, createdAt: true, signedAt: true },
+      orderBy: { createdAt: "desc" },
+    });
   } else if (view === "orders") {
     result.q = text(url.searchParams.get("q"), 200);
     result.orders = await searchDeliveryOrders(
@@ -361,6 +368,11 @@ export default function Deliveries() {
               )}
             </div>
           </div>
+          <div className="delivery-actions">
+            <Link className="delivery-button secondary" to={`/app/deliveries?order=${encodeURIComponent(view.note.snapshot.orderId)}`}>
+              View order delivery progress
+            </Link>
+          </div>
           <DeliverySummary snapshot={view.note.snapshot} />
           {view.note.receipt && <SignedReceipt receipt={view.note.receipt} />}
           {view.note.status === "SIGNED" && (
@@ -475,7 +487,57 @@ export default function Deliveries() {
           </section>
         </>
       ) : view.order ? (
-        <section className="delivery-card">
+        <>
+          <section className="delivery-card delivery-progress" aria-label="Order delivery progress">
+            <div className="delivery-card-heading">
+              <div>
+                <p className="delivery-eyebrow">ORDER DELIVERY TRACKING</p>
+                <h2>{view.order.name} — {view.order.yachtName || view.order.customerName}</h2>
+              </div>
+              <span className={`delivery-progress-status ${view.progress.status}`}>
+                {{ complete: "Fully delivered", partial: "Partially delivered", prepared: "Awaiting signature", not_started: "Not delivered", empty: "No physical items" }[view.progress.status]}
+              </span>
+            </div>
+            <div className="delivery-progress-totals">
+              <div><strong>{view.progress.signed} / {view.progress.total}</strong><span>units signed ({view.progress.percent}%)</span></div>
+              <div><strong>{view.progress.reserved}</strong><span>units reserved on unsigned notes</span></div>
+              <div><strong>{view.progress.available}</strong><span>units available to deliver</span></div>
+            </div>
+            <div className="delivery-progress-track" role="progressbar" aria-label="Signed delivery progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={view.progress.percent}>
+              <div className="delivery-progress-fill" style={{ width: `${view.progress.percent}%` }} />
+            </div>
+            {view.progress.exceedsOrder && (
+              <div className="delivery-alert error">Signed or reserved quantities exceed the current Shopify order. Review changes to the order before preparing another note.</div>
+            )}
+            <p className="delivery-muted">Progress counts signed delivery notes in MYW OrderFlow only. Unsigned notes reserve stock but do not count as delivered. Deliveries recorded outside this app are not included.</p>
+            <h3>Progress by product</h3>
+            <div className="delivery-table-wrap">
+              <table>
+                <thead><tr><th>Product / variant</th><th>Ordered</th><th>Signed</th><th>Reserved</th><th>Available</th></tr></thead>
+                <tbody>
+                  {view.progress.lines.map((line) => (
+                    <tr key={line.id}>
+                      <td><strong>{line.title}</strong><small>{line.variantTitle}{line.sku ? ` | ${line.sku}` : ""}</small></td>
+                      <td>{line.quantity}</td><td>{line.signed}</td><td>{line.reserved}</td><td>{line.available}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <h3>Delivery history</h3>
+            {view.deliveryNotes.length ? (
+              <div className="delivery-progress-history">
+                {view.deliveryNotes.map((note) => (
+                  <Link key={note.id} className="delivery-progress-history-row" to={`/app/deliveries?note=${encodeURIComponent(note.id)}`}>
+                    <span><strong>{note.snapshot.documentNumber}</strong><small>{note.snapshot.scheduledDate || new Date(note.createdAt).toLocaleDateString("en-GB")} · {note.snapshot.representative?.name || "Representative"}</small></span>
+                    <span>{note.snapshot.totalQuantity} units</span>
+                    <Status value={note.status} />
+                  </Link>
+                ))}
+              </div>
+            ) : <p className="delivery-muted">No delivery notes have been created for this order yet.</p>}
+          </section>
+          <section className="delivery-card">
           <p className="delivery-eyebrow">NEW DELIVERY NOTE</p>
           <h2>
             {view.order.name} |{" "}
@@ -630,7 +692,8 @@ export default function Deliveries() {
               </button>
             </p>
           </Form>
-        </section>
+          </section>
+        </>
       ) : view.view === "team" ? (
         <>
           <section className="delivery-card">
