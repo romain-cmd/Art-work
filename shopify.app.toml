@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "eb1370d42caa2857944903e887d21ba5"
-name = "Art-Work Soft"
+name = "MYW OrderFlow"
 application_url = "https://app-production-4da6.up.railway.app"
 embedded = true
 
