@@ -20,9 +20,12 @@ test("shared artwork migration preserves old tokens, responses and ownership", {
       await tx.$executeRawUnsafe(`INSERT INTO "Personalization" VALUES ('legacy')`);
       await tx.$executeRawUnsafe(`INSERT INTO "Proof" VALUES ('proof', 'legacy', 'existing-token', 'approuve')`);
       const sql = await readFile(new URL("../../prisma/migrations/20261020160000_shared_artwork/migration.sql", import.meta.url), "utf8");
-      for (const statement of sql.split(";").map((s) => s.trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
+      const protectedSql = sql.replace(/\$\$[\s\S]*?\$\$/g, (body) => body.replaceAll(";", "__BODY_SEMICOLON__"));
+      for (const statement of protectedSql.split(";").map((s) => s.replaceAll("__BODY_SEMICOLON__", ";").trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
       assert.deepEqual(await tx.$queryRawUnsafe('SELECT "A", "B" FROM "_ProofMarkings"'), [{ A: "legacy", B: "proof" }]);
       assert.deepEqual(await tx.$queryRawUnsafe('SELECT "token", "status", "deletedAt" FROM "Proof"'), [{ token: "existing-token", status: "approuve", deletedAt: null }]);
+      await tx.$executeRawUnsafe(`INSERT INTO "Proof" ("id", "personalizationId", "token", "status") VALUES ('late-proof', 'legacy', 'late-token', 'en_attente')`);
+      assert.equal((await tx.$queryRawUnsafe(`SELECT * FROM "_ProofMarkings" WHERE "B" = 'late-proof'`)).length, 1, "older app inserts during rollout retain their association");
       throw rollback;
     }), (error) => error === rollback);
   } finally { await db.$disconnect(); }
