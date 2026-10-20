@@ -1,3 +1,4 @@
+/* eslint-env node, es2020 */
 import { randomUUID } from "node:crypto";
 import ts from "typescript";
 import { createServer } from "vite";
