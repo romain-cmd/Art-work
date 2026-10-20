@@ -16,6 +16,10 @@ import { groupedMarkings } from "../lib/artwork-groups.server";
 import { sizeSummary, artworkSummary } from "../lib/artwork-groups";
 import { createArtwork, reopenArtworkProduction, invalidateArtworks } from "../lib/shared-artwork.server";
 import { WORKSPACE_STYLES } from "../lib/workspace-styles";
+import { artworkContext, builderFingerprint, commentPoint, dossierProofs, preparationIssues, waitingSince } from "../lib/artwork-workspace";
+import { ArtworkBuilder } from "../components/artwork-builder";
+import { ProofReviewContent, REVIEW_STYLES } from "../components/proof-review-content";
+import { builderSelection, savePreparedArtwork } from "../lib/artwork-builder.server";
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -33,12 +37,13 @@ export const loader = async ({ request }) => {
   }
   const cases = await prisma.artworkCase.findMany({ where: { shop: session.shop }, orderBy: [{ shopifyUpdatedAt: "desc" }, { id: "desc" }] });
   const draftIds = cases.map((c) => c.draftOrderId);
-  const [items, ps, settings] = await Promise.all([
+  const [items, ps, settings, templates] = await Promise.all([
     prisma.artworkItem.findMany({ where: { shop: session.shop, draftOrderId: { in: draftIds }, isActive: true } }),
     prisma.personalization.findMany({ where: { shop: session.shop, draftOrderId: { in: draftIds }, isActive: true }, include: { proofs: { where: { isCurrent: true } } } }),
     prisma.shopSettings.findUnique({ where: { shop: session.shop } }),
+    prisma.artworkTemplate.findMany({ where: { shop: session.shop }, orderBy: { name: "asc" } }),
   ]);
-  return { cases: cases.map((c) => ({ ...c, summary: summarizeCase(items.filter((i) => i.draftOrderId === c.draftOrderId), ps.filter((p) => p.draftOrderId === c.draftOrderId)), products: items.filter((i) => i.draftOrderId === c.draftOrderId).map((i) => `${i.title} ${i.variantTitle || ""} ${i.sku || ""}`).join(" ") })), selected,
+  return { templates, cases: cases.map((c) => ({ ...c, waitingSince: waitingSince(uniqueProofs(ps.filter((p) => p.draftOrderId === c.draftOrderId).flatMap(currentProofs))), summary: summarizeCase(items.filter((i) => i.draftOrderId === c.draftOrderId), ps.filter((p) => p.draftOrderId === c.draftOrderId)), products: items.filter((i) => i.draftOrderId === c.draftOrderId).map((i) => `${i.title} ${i.variantTitle || ""} ${i.sku || ""}`).join(" ") })), selected,
     syncError, shop: session.shop, indexedAt: settings?.artworkIndexedAt,
     emailSubject: settings?.clientEmailSubject || DEFAULT_CLIENT_EMAIL_SUBJECT, emailMessage: settings?.clientEmailMessage || DEFAULT_CLIENT_EMAIL_MESSAGE };
 };
@@ -98,6 +103,24 @@ export const action = async ({ request }) => {
       return { success: true, message: enabled ? "Dossier réactivé" : "Dossier archivé" };
     }
     if (dossier.archivedAt) throw new Error("Réactive ce dossier pour le modifier.");
+    if (intent === "assign-case") {
+      await prisma.artworkCase.update({ where: { id: dossier.id }, data: { responsibleName: str(fd, "responsibleName").slice(0, 100) || null } });
+      return { success: true, message: "Responsable enregistré" };
+    }
+    if (intent === "save-template") {
+      const p = await checkedPersonalization(fd, session.shop, dossier);
+      const name = str(fd, "templateName").slice(0, 100);
+      if (!name) throw new Error("Donne un nom au modèle.");
+      const specs = Object.fromEntries(["type", "dimensions", "color", "location", "customText", "logoUrl", "logoMimeType", "logoFileName"].map((k) => [k, p[k] ?? null]));
+      await prisma.artworkTemplate.create({ data: { shop: session.shop, name, specs } });
+      return { success: true, message: "Modèle disponible dans tous les dossiers de la boutique" };
+    }
+    if (intent === "delete-template") {
+      const template = await prisma.artworkTemplate.findFirst({ where: { id: str(fd, "templateId"), shop: session.shop } });
+      if (!template) throw new Error("Modèle introuvable.");
+      await prisma.artworkTemplate.delete({ where: { id: template.id } });
+      return { success: true, message: "Modèle supprimé. Les marquages existants sont conservés." };
+    }
     if (intent === "rename-yacht") {
       await prisma.artworkCase.update({ where: { id: dossier.id }, data: { yachtName: str(fd, "yachtName") || null } });
       return { success: true, message: "Nom du yacht enregistré" };
@@ -106,6 +129,45 @@ export const action = async ({ request }) => {
     const draft = await metadata(admin, dossier.draftOrderId);
     if (!draft) throw new Error("Ce devis n’existe plus dans Shopify.");
     await reconcileCase(admin, session.shop, draft);
+    if (intent === "prepare-artwork") {
+      const live = await readDossier(dossier.id, session.shop);
+      const selected = builderSelection(live.items, JSON.parse(str(fd, "selectedItems") || "[]"));
+      if (str(fd, "preparationFingerprint") !== builderFingerprint(live, selected.map((i) => i.id))) throw new Error("Les vêtements ou marquages ont changé pendant la préparation. Ferme l’assistant, actualise le dossier puis vérifie les nouvelles informations.");
+      const selectedColors = new Set(selected.map((i) => i.colorLabel || i.variantTitle || ""));
+      if (selectedColors.size > 1 && str(fd, "confirmColors") !== "yes") throw new Error("Confirme que le même artwork convient aux différentes couleurs sélectionnées.");
+      const existingIds = JSON.parse(str(fd, "existingIds") || "[]");
+      if (!Array.isArray(existingIds) || new Set(existingIds).size !== existingIds.length) throw new Error("Sélection de marquages invalide.");
+      const existing = existingIds.map((id) => live.personalizations.find((p) => p.id === id && p.lineItemId === selected[0].lineItemId));
+      if (existing.some((p) => !p)) throw new Error("Les marquages ont changé. Actualise le dossier.");
+      const rows = JSON.parse(str(fd, "markings") || "[]");
+      if (!Array.isArray(rows) || rows.length > 20 || (!rows.length && !existing.length)) throw new Error("Ajoute au moins un marquage (20 nouveaux maximum).");
+      // Validate all quantities and references before uploading any files.
+      const additions = [];
+      for (const row of rows) {
+        const values = new FormData();
+        for (const key of ["type", "dimensions", "color", "location", "customText"]) values.set(key, String(row[key] || "").slice(0, 1000));
+        values.set("quantity", String(row.quantities?.[selected[0].id]));
+        const specs = specifications(values);
+        const quantities = Object.fromEntries(selected.map((i) => {
+          const quantity = Number(row.quantities?.[i.id]);
+          if (!Number.isInteger(quantity) || quantity < 1 || quantity > i.quantity) throw new Error(`Vérifie la quantité de ${i.title} · ${i.variantTitle} : entre 1 et ${i.quantity}.`);
+          return [i.id, quantity];
+        }));
+        const template = row.templateId ? await prisma.artworkTemplate.findFirst({ where: { id: row.templateId, shop: session.shop } }) : null;
+        if (row.templateId && !template) throw new Error("Ce modèle n’existe plus. Choisis un autre modèle.");
+        additions.push({ specs, quantities, logo: template ? Object.fromEntries(["logoUrl", "logoMimeType", "logoFileName"].map((k) => [k, template.specs[k] || null])) : {}, uploadKey: row.key });
+      }
+      const filesToCheck = fd.getAll("proofImages").filter((f) => f?.size > 0);
+      if (!filesToCheck.length || filesToCheck.length > 10 || filesToCheck.some((f) => !acceptsBat(f))) throw new Error("Ajoute de 1 à 10 artworks PNG, JPG, WebP ou PDF de 20 Mo maximum chacun.");
+      for (const row of additions) {
+        const logoData = new FormData(); const file = fd.get(`logo-${row.uploadKey}`);
+        if (file?.size) { logoData.set("logo", file); Object.assign(row.logo, await logoFile(admin, logoData)); }
+      }
+      const files = await proofFiles(admin, fd);
+      await savePreparedArtwork(prisma, { dossier, items: selected, existing, additions, files, expected: str(fd, "preparationFingerprint") });
+      await ensureProductionCards(session.shop, dossier.draftOrderId);
+      return { success: true, message: "BAT enregistré. Vérifie l’aperçu avant de l’envoyer au client." };
+    }
     if (intent === "set-requirement") {
       const item = await prisma.artworkItem.findFirst({ where: { id: str(fd, "itemId"), shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } });
       const requirement = str(fd, "requirement");
@@ -232,18 +294,18 @@ export const action = async ({ request }) => {
 };
 
 const DirtyContext = createContext((...args) => { void args; });
-export function WorkflowForm({ intent, caseId = null, children = null, label = "Enregistrer", onDone = null, confirm = null, className = "", onInput = null }) {
+export function WorkflowForm({ intent, caseId = null, children = null, label = "Enregistrer", onDone = null, confirm = null, className = "", onInput = null, hideSubmit = false, onSubmit = null, tone = "primary" }) {
   const fetcher = useFetcher(); const app = useAppBridge(); const id = useId(); const markDirty = useContext(DirtyContext); const ref = useRef(null);
   useEffect(() => () => markDirty(id, false), [id, markDirty]);
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data?.success) { markDirty(id, false); if (ref.current) delete ref.current.dataset.workflowDirty; app.toast.show(fetcher.data.message || "Enregistré"); onDone?.(fetcher.data); }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data, fetcher.state]);
-  return <fetcher.Form ref={ref} method="post" encType="multipart/form-data" className={`aw-form ${className}`} onChange={(e) => { markDirty(id, true); ref.current.dataset.workflowDirty = "true"; onInput?.(e); }} onSubmit={(e) => { if (confirm && !window.confirm(confirm)) e.preventDefault(); }}>
+  return <fetcher.Form ref={ref} method="post" encType="multipart/form-data" className={`aw-form ${className}`} onChange={(e) => { markDirty(id, true); ref.current.dataset.workflowDirty = "true"; onInput?.(e); }} onSubmit={(e) => { onSubmit?.(e); if (!e.defaultPrevented && confirm && !window.confirm(confirm)) e.preventDefault(); }}>
     <input type="hidden" name="intent" value={intent}/><input type="hidden" name="caseId" value={caseId || ""}/>
     <fieldset disabled={fetcher.state !== "idle"}>{children}
       {fetcher.data?.error && <p className="aw-error" role="alert">{fetcher.data.error}</p>}
-      <button className="aw-button primary" type="submit">{fetcher.state !== "idle" ? "En cours…" : label}</button>
+      {!hideSubmit && <button className={`aw-button ${tone}`} type="submit">{fetcher.state !== "idle" ? "En cours…" : label}</button>}
     </fieldset>
   </fetcher.Form>;
 }
@@ -289,25 +351,39 @@ function GroupChoices({ dossier, item, selected = [item.lineItemId] }) {
   if (!peers.length) return null;
   return <fieldset><legend>Regrouper d’autres tailles dans ce BAT</legend><p>Les marquages seront repris sur les tailles non préparées. Les tailles déjà préparées doivent avoir les mêmes caractéristiques.</p>{peers.map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="groupItemId" value={i.id} defaultChecked={selected.includes(i.lineItemId)}/>{i.variantTitle || i.sizeLabel || "Variante"} · {i.quantity} pièce(s){i.colorLabel && i.colorLabel !== item.colorLabel ? " · autre couleur : à vérifier" : ""}</label>)}</fieldset>;
 }
+function ArtworkComparison({ proof, file, previous }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => { const next = file ? URL.createObjectURL(file) : null; setUrl(next); return () => { if (next) URL.revokeObjectURL(next); }; }, [file]);
+  const render = (src, mime, title) => mime === "application/pdf" || /\.pdf(?:\?|$)/i.test(src) ? <iframe src={src} title={title} className="aw-pdf"/> : <img src={src} alt={title}/>;
+  if (!url && !previous) return null;
+  return <section className="aw-comparison"><div><h4>{url ? `Version actuelle V${proof.version}` : `Version précédente V${previous.version}`}</h4>{render(url ? proof.imageUrl : previous.imageUrl, url ? proof.mimeType : previous.mimeType, "Artwork précédent")}</div><div><h4>{url ? "Nouvel artwork à enregistrer" : `Version actuelle V${proof.version}`}</h4>{render(url || proof.imageUrl, url ? file.type : proof.mimeType, "Nouvel artwork")}</div></section>;
+}
 function ProofView({ proof, p, caseId, readOnly, item = null, markings = [], dossier = null }) {
-  const [mode, setMode] = useState(null); const pdf = proof.mimeType === "application/pdf" || /\.pdf(?:\?|$)/i.test(proof.imageUrl);
+  const [mode, setMode] = useState(null); const [file, setFile] = useState(null);
+  const pdf = proof.mimeType === "application/pdf" || /\.pdf(?:\?|$)/i.test(proof.imageUrl);
   const linked = artworkMarkings(proof, p ? [p] : []); const sizes = sizeSummary(proof);
-  return <article className={`aw-proof ${!proof.isCurrent ? "historic" : ""}`}>
-    <div className="aw-between"><strong>Artwork V{proof.version}{proof.deletedAt ? " · supprimé" : !proof.isCurrent ? " · historique" : ""}</strong><span className="aw-badge">{proof.deletedAt ? "Retiré" : proof.status === "approuve" ? "Validé" : proof.status === "modification_demandee" ? "À corriger" : proof.envoyeLe ? "En attente du client" : "À envoyer"}</span></div>
-    {sizes.articles.length > 0 && <><p>{sizes.articles.map((i) => `${i.colorLabel || ""} ${i.sizeLabel || i.variantTitle || "Variante"} : ${i.quantity}`).join(" · ")} — Total articles : {sizes.total}</p><a href={`/app/artwork-summary?proof=${proof.id}`} target="_blank" rel="noreferrer">Télécharger le récapitulatif tailles (PDF)</a></>}
-    <ul>{(artworkSummary(proof).length ? artworkSummary(proof) : linked).map((row, i) => <li key={row.personalizationId || row.id || i}>{personalizationLabel(row, { product: false })} · {row.quantity} pièce(s)</li>)}</ul>
-    {!proof.deletedAt && <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Ouvrir l’artwork PDF ↗</span> : <img src={proof.imageUrl} alt={`Artwork V${proof.version}`} loading="lazy"/>}</a>}
+  const summary = artworkSummary(proof).length ? artworkSummary(proof) : linked;
+  const point = commentPoint(proof.commentaireClient);
+  const previous = dossier && dossierProofs(dossier).find((pr) => pr.id === proof.supersedesId);
+  const changeMode = (next) => { if (mode && document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Fermer le formulaire sans enregistrer ?")) return; setMode(mode === next ? null : next); setFile(null); };
+  return <article className={`aw-proof ${!proof.isCurrent ? "historic" : ""}`} id={`bat-${proof.id}`}>
+    <div className="aw-between"><div><h3>{p?.productTitle || proof.snapshot?.productTitle || "BAT"}{sizes.total > 0 ? ` · ${sizes.total} vêtements` : ""}</h3><small>BAT V{proof.version}{proof.deletedAt ? " · retiré" : !proof.isCurrent ? " · historique" : ""}</small></div><span className={`aw-badge ${proof.status === "approuve" ? "success" : proof.status === "modification_demandee" ? "warning" : ""}`}>{proof.deletedAt ? "Retiré" : proof.status === "approuve" ? "Validé" : proof.status === "modification_demandee" ? "À corriger" : proof.envoyeLe ? "En attente du client" : "À envoyer"}</span></div>
+    {sizes.articles.length > 0 && <div className="aw-chips">{sizes.articles.map((i) => <span className="aw-chip" key={i.lineItemId}>{[i.colorLabel, i.sizeLabel || i.variantTitle].filter(Boolean).join(" / ")} : {i.quantity}</span>)}</div>}
+    {!proof.deletedAt && <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Consulter l’artwork PDF ↗</span> : <span className="aw-image-wrap"><img src={proof.imageUrl} alt={`Artwork V${proof.version}`} loading="lazy"/>{point && <span className="aw-point" style={{ left: `${point.x}%`, top: `${point.y}%` }} aria-label="Repère du commentaire client">1</span>}</span>}</a>}
     <p className="aw-muted">{proof.fileName || "Fichier artwork"}</p>
-    {proof.commentaireClient && <blockquote>{proof.commentaireClient}</blockquote>}
+    <div className="aw-chips">{summary.map((row, i) => <span className="aw-chip" key={i}>{row.type} · {row.location} · {row.quantity} pièces</span>)}</div>
+    {sizes.articles.length > 0 && <a href={`/app/artwork-summary?proof=${proof.id}`} target="_blank" rel="noreferrer">Récapitulatif tailles (PDF)</a>}
+    {proof.commentaireClient && <div className="aw-correction"><strong>Correction demandée par le client</strong><blockquote>{proof.commentaireClient}</blockquote></div>}
     {proof.envoyeLe && <small>Dernier envoi : {date(proof.envoyeLe)}</small>}{proof.reponduLe && <small>Réponse : {date(proof.reponduLe)}{proof.approvedVia ? ` · ${proof.approvedVia}` : ""}</small>}
     {!readOnly && proof.isCurrent && item && <>
-      <div className="aw-toolbar"><button className="aw-button" onClick={() => setMode(mode === "revise" ? null : "revise")}>Remplacer l’artwork</button><button className="aw-button" onClick={() => setMode(mode === "link" ? null : "link")}>Modifier les marquages associés</button>{proof.status === "en_attente" && <button className="aw-button" onClick={() => setMode(mode === "approve" ? null : "approve")}>Validation reçue ailleurs</button>}</div>
-      {mode && <WorkflowForm intent={mode === "revise" ? "revise-proof" : mode === "link" ? "link-proof" : "manual-approve"} caseId={caseId} label={mode === "approve" ? "Enregistrer la validation" : "Enregistrer la nouvelle version"} confirm={mode === "approve" ? "Confirmer que le client a validé cette version commune pour tous les marquages associés ?" : null} onDone={() => setMode(null)}>
-        <input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/><input type="hidden" name="personalizationId" value={p.id}/>
-        {mode === "approve" ? <label>Canal de validation<select name="approvedVia" required><option>Email</option><option>WhatsApp</option><option>Téléphone</option></select></label> : <><MarkingChoices markings={markings} selected={linked.map((row) => row.personalizationId || row.id)}/><GroupChoices dossier={dossier} item={item} selected={dossier.personalizations.filter((row) => row.proofs.some((pr) => pr.id === proof.id)).map((row) => row.lineItemId)}/>{mode === "revise" && <label>Nouvel artwork<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf"/></label>}<p>Cette action crée une nouvelle version à faire valider pour tous les marquages associés.</p></>}
-      </WorkflowForm>}
-      <WorkflowForm intent="delete-proof" caseId={caseId} label="Supprimer l’artwork" confirm="Retirer cet artwork pour tous ses marquages ? Le lien client sera désactivé et la production concernée sera à revoir. Une trace restera dans l’historique."><input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/></WorkflowForm>
+      <div className="aw-toolbar"><button type="button" className={`aw-button ${proof.status === "modification_demandee" ? "primary" : ""}`} onClick={() => changeMode("revise")}>{proof.status === "modification_demandee" ? "Préparer la correction" : "Remplacer l’artwork"}</button></div>
+      <details><summary>Autres actions</summary><div className="aw-toolbar"><button className="aw-button" onClick={() => changeMode("link")}>Modifier les marquages associés</button>{proof.status === "en_attente" && <button className="aw-button" onClick={() => changeMode("approve")}>Validation reçue ailleurs</button>}</div><WorkflowForm intent="delete-proof" caseId={caseId} tone="danger" label="Supprimer l’artwork" confirm={`Retirer ce BAT pour ${sizes.total || "les"} vêtements et tous ses marquages ? Le lien client sera désactivé et la production concernée sera à revoir. L’historique sera conservé.`}><input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/></WorkflowForm></details>
+      {mode && <div className="aw-editor"><div className="aw-between"><h4>{mode === "revise" ? "Remplacer le fichier" : mode === "link" ? "Périmètre du BAT commun" : "Validation reçue ailleurs"}</h4><button className="aw-button" onClick={() => changeMode(mode)}>Annuler</button></div><WorkflowForm intent={mode === "revise" ? "revise-proof" : mode === "link" ? "link-proof" : "manual-approve"} caseId={caseId} label={mode === "approve" ? "Enregistrer la validation" : "Enregistrer la nouvelle version"} confirm={mode === "approve" ? "Confirmer que le client a validé cette version commune pour tous les marquages et vêtements associés ?" : null} onDone={() => { setMode(null); setFile(null); }}>
+        <input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/><input type="hidden" name="personalizationId" value={p?.id || ""}/>
+        {mode === "approve" ? <label>Canal de validation<select name="approvedVia" required><option>Email</option><option>WhatsApp</option><option>Téléphone</option></select></label> : <><MarkingChoices markings={markings} selected={linked.map((row) => row.personalizationId || row.id)}/><GroupChoices dossier={dossier} item={item} selected={dossier.personalizations.filter((row) => row.proofs.some((pr) => pr.id === proof.id)).map((row) => row.lineItemId)}/>{mode === "revise" && <><label>Nouvel artwork<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)}/></label><ArtworkComparison proof={proof} file={file}/></>}<p className="aw-notice">Une nouvelle validation sera requise pour tous les marquages et vêtements de ce BAT.</p></>}
+      </WorkflowForm></div>}
     </>}
+    {previous && <details><summary>Comparer avec la version précédente</summary><ArtworkComparison proof={proof} previous={previous}/></details>}
   </article>;
 }
 function PersonalizationView({ p, dossier, item }) {
@@ -318,24 +394,18 @@ function PersonalizationView({ p, dossier, item }) {
     {editing && <PersonalizationEditor dossier={dossier} item={item} p={p} onClose={() => setEditing(false)}/>}
     {duplicating && <PersonalizationEditor dossier={dossier} item={item} duplicate={p} onClose={() => setDuplicating(false)}/>}
     {copy && <WorkflowForm intent="copy-personalization" caseId={dossier.id} label="Copier les paramètres et le logo" onDone={() => setCopy(false)}><input type="hidden" name="personalizationId" value={p.id}/><p>Les artworks et validations ne sont pas copiés.</p>{dossier.items.filter((i) => i.requirement === "required" && i.lineItemId !== p.lineItemId).map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="targetItemId" value={i.id}/>{i.title} · {i.variantTitle} · {i.quantity} pièce(s)</label>)}</WorkflowForm>}
+    {!dossier.archivedAt && <details><summary>Enregistrer comme modèle réutilisable</summary><WorkflowForm intent="save-template" caseId={dossier.id} label="Enregistrer le modèle"><input type="hidden" name="personalizationId" value={p.id}/><label>Nom du modèle<input name="templateName" maxLength={100} placeholder="Ex. Broderie poitrine yacht" required/></label><small>Le logo et les caractéristiques seront disponibles dans tous les dossiers de cette boutique. Les quantités restent propres aux vêtements choisis.</small></WorkflowForm></details>}
     {!currentProofs(p).length && <p className="aw-notice">Ce marquage reste à associer à un artwork dans la section ci-dessous.</p>}
   </section>;
 }
-function ArticleArtworks({ dossier, item }) {
-  const markings = dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId);
-  const proofs = uniqueProofs(markings.flatMap((p) => p.proofs));
-  const current = proofs.filter((proof) => proof.isCurrent && !proof.deletedAt);
-  const history = proofs.filter((proof) => !proof.isCurrent || proof.deletedAt);
-  const readOnly = Boolean(dossier.archivedAt) || item.requirement !== "required";
-  const view = (proof) => <ProofView key={proof.id} proof={proof} p={markings.find((p) => p.proofs.some((pr) => pr.id === proof.id))} item={item} markings={markings} dossier={dossier} caseId={dossier.id} readOnly={readOnly || !proof.isCurrent}/>;
-  return <section className="aw-personalization"><h3>Artworks de cet article</h3><p>Un même fichier peut présenter plusieurs personnalisations. Le client voit chaque artwork une seule fois avec les caractéristiques de ses marquages.</p>
-    <div className="aw-proof-grid">{current.map(view)}</div>
-    {!readOnly && markings.length > 0 && <details><summary>Importer un artwork commun</summary><WorkflowForm intent="add-article-proofs" caseId={dossier.id} label="Enregistrer l’artwork"><input type="hidden" name="itemId" value={item.id}/><MarkingChoices markings={markings}/><GroupChoices dossier={dossier} item={item}/><label>Artwork image ou PDF<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf" multiple/></label><p>PNG, JPG, WebP ou PDF, 20 Mo maximum par fichier. Tous les marquages sont sélectionnés par défaut.</p></WorkflowForm></details>}
-    {history.length > 0 && <details><summary>Historique des artworks ({history.length})</summary><div className="aw-proof-grid">{history.map(view)}</div></details>}
-  </section>;
+function DossierArtworks({ dossier }) {
+  const proofs = dossierProofs(dossier); const current = proofs.filter((pr) => pr.isCurrent && !pr.deletedAt);
+  const history = proofs.filter((pr) => !pr.isCurrent || pr.deletedAt);
+  const view = (proof) => { const context = artworkContext(dossier, proof); return <ProofView key={proof.id} proof={proof} {...context} dossier={dossier} caseId={dossier.id} readOnly={Boolean(dossier.archivedAt) || !proof.isCurrent || context.item?.requirement !== "required"}/>; };
+  return <section aria-label="BAT communs du dossier"><div className="aw-proof-grid">{current.map(view)}</div>{!current.length && <div className="aw-empty aw-panel"><h2>Prépare ton premier BAT</h2><p>Regroupe les vêtements, ajoute leurs marquages et importe l’artwork dans l’assistant.</p></div>}{history.length > 0 && <details><summary>Historique des artworks ({history.length})</summary><div className="aw-proof-grid">{history.map(view)}</div></details>}</section>;
 }
 function SendPreview({ dossier, mode, subject, message }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false); const [preview, setPreview] = useState(false);
   const requiredIds = dossier.items.filter((i) => i.requirement === "required").map((i) => i.lineItemId);
   const proofs = uniqueProofs(dossier.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, productTitle: artworkLabel(proof, { english: true }) }))));
   if (!proofs.length) return null;
@@ -346,34 +416,42 @@ function SendPreview({ dossier, mode, subject, message }) {
     {open && <div className="aw-editor"><h3>{mode === "reminder" ? "Vérifier la relance" : "Vérifier l’envoi"}</h3><WorkflowForm intent="send-for-validation" caseId={dossier.id} label={mode === "reminder" ? "Confirmer la relance" : "Confirmer l’envoi"} onDone={() => setOpen(false)}>
       <input type="hidden" name="sendMode" value={mode}/><input type="hidden" name="proofIds" value={proofs.map((p) => p.id).join(",")}/>
       <label>Destinataire<input type="email" name="customerEmail" defaultValue={dossier.email || ""} required/></label>
-      <strong>BAT inclus</strong><ul>{proofs.map((p) => <li key={p.id}><a href={p.imageUrl} target="_blank" rel="noreferrer">{p.productTitle}, V{p.version}</a>{p.envoyeLe ? ` · envoyé le ${date(p.envoyeLe)}` : " · nouvel envoi"}</li>)}</ul>
+      <p className="aw-muted">Langue de l’email et du parcours client : anglais.</p>
+      <div className="aw-send-grid">{proofs.map((p) => <article key={p.id} className="aw-send-card"><a href={p.imageUrl} target="_blank" rel="noreferrer">{p.mimeType === "application/pdf" ? <span className="aw-file-icon">PDF</span> : <img src={p.imageUrl} alt={`Aperçu ${p.productTitle}`}/>}<strong>{p.productTitle} · V{p.version}</strong></a><p>{sizeSummary(p).articles.map((i) => `${i.variantTitle || i.sizeLabel}: ${i.quantity}`).join(" · ")}</p><small>Pièce jointe : récapitulatif tailles PDF{p.envoyeLe ? ` · dernier envoi ${date(p.envoyeLe)}` : ""}</small></article>)}</div>
+      <button className="aw-button" type="button" onClick={() => setPreview(!preview)}>{preview ? "Fermer l’aperçu client" : "Voir comme le client"}</button>
+      {preview && <div className="pr-page aw-client-preview"><style>{REVIEW_STYLES}</style><p className="pr-preview-banner">Aperçu interne — aucune réponse ni aucun envoi ne peut être enregistré ici.</p>{proofs.map((p) => <ProofReviewContent key={p.id} proof={{ ...p, markings: artworkSummary(p).length ? artworkSummary(p) : artworkMarkings(p, [p.personalization]), sizes: sizeSummary(p) }} summaryUrl={`/app/artwork-summary?proof=${p.id}`}/>)}</div>}
       <div className="aw-email-preview"><strong>{applyPlaceholders(subject, { orderName: name })}</strong><p>{applyPlaceholders(message, { orderName: name })}</p><p>Review my designs</p></div>
     </WorkflowForm></div>}
   </section>;
 }
-function DossierView({ dossier, shop, emailSubject, emailMessage }) {
-  const [tab, setTab] = useState("articles"); const [editor, setEditor] = useState(null); const summary = summarizeCase(dossier.items, dossier.personalizations);
-  const changeTab = (next) => { if (next !== tab && document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Changer d’onglet sans enregistrer les modifications ?")) return; setTab(next); };
-  const hasPending = dossier.items.some((i) => i.requirement === "pending");
+function DossierView({ dossier, shop, emailSubject, emailMessage, templates }) {
+  const [tab, setTab] = useState("bats"); const [editor, setEditor] = useState(null); const [builder, setBuilder] = useState(null); const [expandedItem, setExpandedItem] = useState(null);
+  const markDirty = useContext(DirtyContext); const summary = summarizeCase(dossier.items, dossier.personalizations); const issues = preparationIssues(dossier);
+  const guard = () => !document.querySelector('[data-workflow-dirty="true"]') || window.confirm("Quitter le formulaire sans enregistrer les modifications ?");
+  const changeTab = (next) => { if (next !== tab && guard()) { setTab(next); setBuilder(null); } };
+  const prepare = (item = null) => { if (guard()) { setBuilder({ item }); setTab("bats"); } };
   return <>
-    <header className="aw-panel"><div className="aw-between"><div><h1>{dossier.yachtName || dossier.customerName || "Dossier artwork"}</h1><p>{dossier.name} · {dossier.customerName || dossier.email || "Client non renseigné"}</p><Badge status={summary.status}/></div><a className="aw-button" href={`https://${shop}/admin/draft_orders/${dossier.draftOrderId.split("/").pop()}`} target="_blank" rel="noreferrer">Ouvrir dans Shopify ↗</a></div>
-      <p className="aw-muted">Dernière modification Shopify : {date(dossier.shopifyUpdatedAt)} · Synchronisé : {date(dossier.syncedAt)}</p>
-      <div className="aw-toolbar"><strong>{summary.approved} BAT validé(s) sur {summary.total}</strong><span>{summary.required} article(s) avec BAT requis</span>{dossier.orderId && <span className="aw-badge">Commande {dossier.orderName}</span>}</div>
-      {dossier.archivedAt ? <div className="aw-notice"><p>Dossier archivé. Les fichiers et l’historique sont conservés.</p><WorkflowForm caseId={dossier.id} intent="restore-case" label="Réactiver le dossier"/></div> : <><div className="aw-toolbar"><SendPreview dossier={dossier} mode="new" subject={emailSubject} message={emailMessage}/><SendPreview dossier={dossier} mode="reminder" subject={emailSubject} message={emailMessage}/></div><details><summary>Informations et actions du dossier</summary><WorkflowForm intent="rename-yacht" caseId={dossier.id} label="Enregistrer le nom"><label>Nom du yacht<input name="yachtName" defaultValue={dossier.yachtName || ""}/></label></WorkflowForm><WorkflowForm intent="archive-case" caseId={dossier.id} label="Retirer du suivi artwork" confirm="Retirer ce devis du suivi actif ? Ses fichiers et son historique seront conservés."/></details></>}
+    <header className="aw-panel aw-dossier-header"><div className="aw-between"><div><span className="aw-eyebrow">Dossier {dossier.name}</span><h1>{dossier.yachtName || dossier.customerName || "Dossier artwork"}</h1><p>{dossier.customerName || dossier.email || "Client non renseigné"}{dossier.responsibleName ? ` · Responsable : ${dossier.responsibleName}` : ""}</p><Badge status={summary.status}/></div><div className="aw-toolbar">{!dossier.archivedAt && !builder && <button className="aw-button primary" onClick={() => prepare()}>Préparer un BAT</button>}<a className="aw-button" href={`https://${shop}/admin/draft_orders/${dossier.draftOrderId.split("/").pop()}`} target="_blank" rel="noreferrer">Ouvrir dans Shopify ↗</a></div></div>
+      <div className="aw-toolbar"><strong>{summary.approved} / {summary.total} BAT validés</strong><span>{dossier.items.reduce((sum, i) => sum + i.quantity, 0)} vêtements au devis</span>{dossier.orderId && <span className="aw-badge">Commande {dossier.orderName}</span>}</div>
+      <div className="aw-progress" role="progressbar" aria-label="BAT validés" aria-valuenow={summary.approved} aria-valuemin={0} aria-valuemax={summary.total || 1}><span style={{ width: `${summary.total ? summary.approved / summary.total * 100 : 0}%` }}/></div>
+      {dossier.archivedAt ? <div className="aw-notice"><p>Dossier archivé. Les fichiers et l’historique sont conservés.</p><WorkflowForm caseId={dossier.id} intent="restore-case" label="Réactiver le dossier"/></div> : <><div className="aw-toolbar aw-send-actions"><SendPreview dossier={dossier} mode="new" subject={emailSubject} message={emailMessage}/><SendPreview dossier={dossier} mode="reminder" subject={emailSubject} message={emailMessage}/></div><details><summary>Informations et actions du dossier</summary><p className="aw-muted">Dernière modification Shopify : {date(dossier.shopifyUpdatedAt)} · Synchronisé : {date(dossier.syncedAt)}</p><WorkflowForm intent="rename-yacht" caseId={dossier.id} label="Enregistrer le nom"><label>Nom du yacht<input name="yachtName" defaultValue={dossier.yachtName || ""}/></label></WorkflowForm><WorkflowForm intent="assign-case" caseId={dossier.id} label="Enregistrer le responsable"><label>Responsable du dossier<input name="responsibleName" maxLength={100} defaultValue={dossier.responsibleName || ""} placeholder="Nom du membre de l’équipe"/></label></WorkflowForm><WorkflowForm intent="archive-case" caseId={dossier.id} tone="danger" label="Retirer du suivi artwork" confirm="Retirer ce devis du suivi actif ? Ses fichiers et son historique seront conservés."/></details></>}
     </header>
-    <nav className="aw-tabs" aria-label="Sections du dossier"><button className={tab === "articles" ? "active" : ""} onClick={() => changeTab("articles")}>Articles et BAT</button><button className={tab === "history" ? "active" : ""} onClick={() => changeTab("history")}>Historique ({dossier.events.length})</button></nav>
-    {tab === "history" ? <section className="aw-panel"><h2>Historique du dossier</h2>{dossier.removedPersonalizations?.length > 0 && <details><summary>BAT d’articles retirés du devis ({dossier.removedPersonalizations.length})</summary>{dossier.removedPersonalizations.map((p) => <section key={p.id}><h3>{p.productTitle} · article retiré ou à vérifier</h3><div className="aw-proof-grid">{p.proofs.map((proof) => <ProofView key={proof.id} proof={proof} p={p} caseId={dossier.id} readOnly/>)}</div></section>)}</details>}{dossier.events.length ? <ol className="aw-timeline">{dossier.events.map((e) => <li key={e.id}><strong>{e.message}</strong><small>{date(e.createdAt)} · {e.actor}</small></li>)}</ol> : <p>Les nouveaux événements apparaîtront ici. Les anciens BAT sont conservés dans chaque article.</p>}</section> : <>
-      {hasPending && <p className="aw-notice">Pour chaque article « À qualifier », choisis s’il nécessite un BAT. Les articles sans BAT ne bloqueront pas la validation.</p>}
-      {dossier.items.map((item) => <section key={item.id} className="aw-panel"><div className="aw-between"><div><h2>{item.title}</h2><p className="aw-muted">Variante / taille du vêtement : {item.variantTitle || "Non renseignée"} · Quantité Shopify : {item.quantity}{item.sku ? ` · Réf. ${item.sku}` : ""}</p></div><span className="aw-badge">{item.requirement === "required" ? "BAT requis" : item.requirement === "none" ? "Sans BAT requis" : "À qualifier"}</span></div>
+    {!dossier.archivedAt && !builder && issues.length > 0 && <section className="aw-notice"><strong>Avant l’envoi · {issues.length} élément(s) à compléter</strong><ul className="aw-issues">{issues.map(({ item, message }) => <li key={item.id}><span>{message}</span><button className="aw-button" onClick={() => { if (guard()) { setTab("articles"); setBuilder(null); setExpandedItem(item.id); } }}>Compléter</button></li>)}</ul></section>}
+    <nav className="aw-tabs" aria-label="Sections du dossier">{[["bats", `BAT communs (${summary.total})`], ["articles", "Vêtements et marquages"], ["models", `Modèles (${templates.length})`], ["history", `Historique (${dossier.events.length})`]].map(([key, title]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "active" : ""} onClick={() => changeTab(key)}>{title}</button>)}</nav>
+    {tab === "bats" && <>{builder && <ArtworkBuilder key={`${dossier.id}-${builder.item?.id || "new"}`} dossier={dossier} templates={templates} initialItem={builder.item} Form={WorkflowForm} markDirty={markDirty} onClose={() => setBuilder(null)} onDone={() => setBuilder(null)}/>}{!builder && <DossierArtworks dossier={dossier}/>}</>}
+    {tab === "history" && <section className="aw-panel"><h2>Historique du dossier</h2>{dossier.removedPersonalizations?.length > 0 && <details><summary>BAT d’articles retirés du devis ({dossier.removedPersonalizations.length})</summary>{dossier.removedPersonalizations.map((p) => <section key={p.id}><h3>{p.productTitle} · article retiré ou à vérifier</h3><div className="aw-proof-grid">{p.proofs.map((proof) => <ProofView key={proof.id} proof={proof} p={p} caseId={dossier.id} readOnly/>)}</div></section>)}</details>}{dossier.events.length ? <ol className="aw-timeline">{dossier.events.map((e) => <li key={e.id}><strong>{e.message}</strong><small>{date(e.createdAt)} · {e.actor}</small></li>)}</ol> : <p>Les nouveaux événements apparaîtront ici.</p>}</section>}
+    {tab === "models" && <section className="aw-panel"><h2>Modèles de marquages</h2><p>Enregistre un marquage depuis « Vêtements et marquages » pour reprendre ses caractéristiques et son logo dans d’autres dossiers.</p>{templates.map((t) => <div className="aw-search-result" key={t.id}><div><strong>{t.name}</strong><small>{[t.specs.type, t.specs.location, t.specs.dimensions].filter(Boolean).join(" · ")}</small></div>{!dossier.archivedAt && <WorkflowForm intent="delete-template" caseId={dossier.id} tone="danger" label="Supprimer le modèle" confirm="Supprimer ce modèle pour la boutique ? Les marquages déjà créés resteront inchangés."><input type="hidden" name="templateId" value={t.id}/></WorkflowForm>}</div>)}</section>}
+    {tab === "articles" && dossier.items.map((item) => <section id={`article-${item.id}`} key={item.id} className="aw-panel"><div className="aw-between"><div><h2>{item.title}</h2><p className="aw-muted">{item.variantTitle || "Variante non renseignée"} · {item.quantity} vêtements{item.sku ? ` · Réf. ${item.sku}` : ""}</p></div><span className="aw-badge">{item.requirement === "required" ? "BAT requis" : item.requirement === "none" ? "Sans BAT requis" : "À qualifier"}</span></div>
+      {!dossier.archivedAt && item.requirement !== "none" && <button className="aw-button" onClick={() => prepare(item)}>Préparer un BAT pour ces vêtements</button>}
+      <details open={expandedItem === item.id} onToggle={(e) => { if (e.currentTarget.open) setExpandedItem(item.id); }}><summary>Marquages et suivi de cette taille</summary>
         {!dossier.archivedAt && <WorkflowForm intent="set-requirement" caseId={dossier.id} label="Appliquer" className="aw-inline-form"><input type="hidden" name="itemId" value={item.id}/><label>Suivi de cet article<select key={item.requirement} name="requirement" defaultValue={item.requirement}><option value="pending">À qualifier</option><option value="required">BAT requis</option><option value="none">Sans BAT requis</option></select></label></WorkflowForm>}
-        {item.requirement !== "required" && <p className="aw-muted">{item.requirement === "none" ? "Cet article n’entre pas dans la validation des BAT." : "Décide si cet article nécessite un artwork."}</p>}
-        {item.requirement === "required" && <p className="aw-muted">{dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId).length} personnalisation(s) sur cet article. Les quantités de marquage ne s’additionnent pas aux pièces à livrer.</p>}
+        {item.requirement !== "required" && <p className="aw-muted">{item.requirement === "none" ? "Cet article n’entre pas dans la validation des BAT." : "Décide si cet article nécessite un artwork, ou prépare-le directement avec l’assistant."}</p>}
+        {item.requirement === "required" && <p className="aw-muted">Les mêmes vêtements peuvent recevoir plusieurs marquages. Leurs quantités ne s’additionnent pas aux pièces à livrer.</p>}
         {dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId).map((p) => <PersonalizationView key={p.id} p={p} item={item} dossier={dossier}/>)}
         {item.requirement === "required" && !dossier.archivedAt && <button className="aw-button" onClick={() => setEditor(item.id)}>Ajouter une personnalisation</button>}
         {editor === item.id && <PersonalizationEditor dossier={dossier} item={item} onClose={() => setEditor(null)}/>}
-        <ArticleArtworks dossier={dossier} item={item}/>
-      </section>)}
-    </>}
+      </details>
+    </section>)}
   </>;
 }
 export default function Personnalisation() {
@@ -393,19 +471,19 @@ export default function Personnalisation() {
   const update = (key, value) => { const params = new URLSearchParams(url.search); value ? params.set(key, value) : params.delete(key); params.delete("case"); setPage(1); navigate(`?${params}`, { preventScrollReset: true }); };
   const open = (id) => { const params = new URLSearchParams(url.search); params.set("case", id); setAdd(false); navigate(`?${params}`); };
   const active = data.cases.filter((c) => Boolean(c.archivedAt) === archive);
-  const matching = active.filter((c) => `${c.name} ${c.customerName || ""} ${c.yachtName || ""} ${c.email || ""} ${c.products}`.toLocaleLowerCase().includes(q.toLocaleLowerCase()));
+  const matching = active.filter((c) => `${c.name} ${c.customerName || ""} ${c.yachtName || ""} ${c.email || ""} ${c.products} ${c.responsibleName || ""}`.toLocaleLowerCase().includes(q.toLocaleLowerCase()));
   const visible = matching.filter((c) => filter === "all" || c.summary.status === filter);
-  const attention = active.filter((c) => c.summary.status === "a_corriger");
+
   return <DirtyContext.Provider value={markDirty}><s-page heading={data.selected ? "Dossier artwork" : "Dossiers artwork"}><style>{WORKSPACE_STYLES}</style><main className="aw-workspace">
     {data.syncError && <p role="alert" className="aw-error">{data.syncError} Les dernières données connues sont affichées.</p>}
-    {data.selected ? <><Link className="aw-back" to={`?${new URLSearchParams([...url.searchParams].filter(([k]) => k !== "case"))}`}>← Retour aux dossiers</Link><DossierView key={data.selected.id} dossier={data.selected} shop={data.shop} emailSubject={data.emailSubject} emailMessage={data.emailMessage}/></> : <>
+    {data.selected ? <><Link className="aw-back" to={`?${new URLSearchParams([...url.searchParams].filter(([k]) => k !== "case"))}`}>← Retour aux dossiers</Link><DossierView key={data.selected.id} dossier={data.selected} shop={data.shop} emailSubject={data.emailSubject} emailMessage={data.emailMessage} templates={data.templates}/></> : <>
       <header className="aw-between"><div><h1>Dossiers artwork</h1><p className="aw-muted">Uniquement les devis nécessitant un BAT. Derniers devis modifiés en premier.</p></div><button className="aw-button primary" onClick={() => setAdd(!add)}>Ajouter un devis Shopify</button></header>
       {add && <AddCase onClose={() => setAdd(false)} onOpen={open}/>}
-      {attention.length > 0 && !archive && <div className="aw-notice"><strong>Actions prioritaires : {attention.length} dossier(s) à corriger</strong><button className="aw-button" onClick={() => update("status", "a_corriger")}>Voir les corrections</button></div>}
-      <section className="aw-panel"><div className="aw-toolbar"><form className="aw-toolbar aw-grow" onSubmit={(e) => { e.preventDefault(); update("q", query); }}><label className="aw-grow">Rechercher un dossier<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Devis, client, yacht, produit ou référence"/></label><button className="aw-button">Rechercher</button></form><WorkflowForm intent="refresh-index" label="Actualiser Shopify"/></div>
+      {!archive && <nav className="aw-queue" aria-label="Travail à réaliser">{["a_personnaliser", "a_corriger", "a_envoyer", "en_attente_reponse", "valide"].map((status) => <button key={status} aria-pressed={filter === status} onClick={() => update("status", filter === status ? "" : status)}><strong>{matching.filter((c) => c.summary.status === status).length}</strong><span>{({ a_personnaliser: "À préparer", a_corriger: "Corrections client", a_envoyer: "Prêts à envoyer", en_attente_reponse: "En attente client", valide: "BAT validés" })[status]}</span></button>)}</nav>}
+      <section className="aw-panel"><div className="aw-toolbar"><form className="aw-toolbar aw-grow" onSubmit={(e) => { e.preventDefault(); update("q", query); }}><label className="aw-grow">Rechercher un dossier<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Devis, client, yacht, produit, référence ou responsable"/></label><button className="aw-button">Rechercher</button></form><WorkflowForm intent="refresh-index" label="Actualiser Shopify"/></div>
         <div className="aw-filters"><button className={filter === "all" ? "active" : ""} onClick={() => update("status", "")}>Tous ({matching.length})</button>{Object.entries(CASE_STATUSES).map(([key, meta]) => <button key={key} className={filter === key ? "active" : ""} onClick={() => update("status", key)}>{meta.label} ({matching.filter((c) => c.summary.status === key).length})</button>)}<button onClick={() => update("archived", archive ? "" : "1")}>{archive ? "Voir les actifs" : "Archives"}</button></div>
         <p className="aw-muted">{visible.length} dossier(s){archive ? " archivé(s)" : " actif(s)"} · Index Shopify : {date(data.indexedAt)}</p>
-        {!visible.length ? <div className="aw-empty"><h2>{q || filter !== "all" ? "Aucun dossier ne correspond" : "Aucun dossier artwork"}</h2><p>{q || filter !== "all" ? "Essaie un autre filtre ou une autre recherche." : `Ajoute un devis ici ou utilise le tag ${ARTWORK_TAG} dans Shopify.`}</p></div> : <div className="aw-table-wrap"><table className="aw-table"><thead><tr><th>Devis / client</th><th>Avancement</th><th>Modification Shopify</th><th>Action</th></tr></thead><tbody>{visible.slice(0, page * 30).map((c) => <tr key={c.id}><td><button className="aw-name" onClick={() => open(c.id)}>{c.yachtName || c.customerName || c.name}</button><small>{c.name} · {c.customerName || c.email || "Client non renseigné"}</small></td><td><Badge status={c.summary.status}/><small>{c.summary.approved} / {c.summary.total} BAT validé(s){c.summary.pendingQualification ? " · articles à qualifier" : ""}</small></td><td>{date(c.shopifyUpdatedAt)}</td><td><button className="aw-button" onClick={() => open(c.id)}>{CASE_STATUSES[c.summary.status].action}</button></td></tr>)}</tbody></table></div>}
+        {!visible.length ? <div className="aw-empty"><h2>{q || filter !== "all" ? "Aucun dossier ne correspond" : "Aucun dossier artwork"}</h2><p>{q || filter !== "all" ? "Essaie un autre filtre ou une autre recherche." : `Ajoute un devis ici ou utilise le tag ${ARTWORK_TAG} dans Shopify.`}</p></div> : <div className="aw-table-wrap"><table className="aw-table"><thead><tr><th>Devis / client</th><th>Avancement</th><th>Suivi équipe</th><th>Action</th></tr></thead><tbody>{visible.slice(0, page * 30).map((c) => <tr key={c.id}><td><button className="aw-name" onClick={() => open(c.id)}>{c.yachtName || c.customerName || c.name}</button><small>{c.name} · {c.customerName || c.email || "Client non renseigné"}</small></td><td><Badge status={c.summary.status}/><small>{c.summary.approved} / {c.summary.total} BAT validé(s){c.summary.pendingQualification ? " · articles à qualifier" : ""}</small></td><td>{c.responsibleName || "Non attribué"}<small>{c.waitingSince ? `En attente depuis ${Math.max(0, Math.floor((Date.now() - new Date(c.waitingSince).getTime()) / 86400000))} jour(s)` : `Modifié le ${date(c.shopifyUpdatedAt)}`}</small></td><td><button className="aw-button" onClick={() => open(c.id)}>{CASE_STATUSES[c.summary.status].action}</button></td></tr>)}</tbody></table></div>}
         {visible.length > page * 30 && <button className="aw-button" onClick={() => setPage(page + 1)}>Afficher 30 dossiers supplémentaires</button>}
       </section>
     </>}

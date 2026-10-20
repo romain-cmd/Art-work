@@ -16,7 +16,7 @@ export function createFixture() {
     artworkCase: [{ id: "case", shop: item.shop, draftOrderId: "draft", name: "D100", email: draft.email, orderId: "order", orderName: "#100", yachtName: "Example Yacht", archivedAt: null, syncedAt: now, shopifyUpdatedAt: now }],
     proof: [{ id: "proof-chest", personalizationId: p.id, _markingIds: [p.id], token: "token-chest", imageUrl: "/test/bat.svg", mimeType: "image/svg+xml", fileName: "chest.svg", version: 1, isCurrent: true, status: "approuve", snapshot: snapshotPersonalization(p), envoyeLe: now, reponduLe: now, createdAt: now }],
     kanbanCard: [{ id: "card-chest", shop: item.shop, draftOrderId: "draft", personalizationId: p.id, orderId: "order", orderName: "#100", status: "en_cours", lastSentAt: now, lastSentTo: "partner@example.test", createdAt: now }],
-    artworkEvent: [], shopSettings: [{ shop: item.shop, artworkIndexedAt: now }], partnerEmail: [],
+    artworkTemplate: [], artworkEvent: [], shopSettings: [{ shop: item.shop, artworkIndexedAt: now }], partnerEmail: [],
   };
   function matches(row, where = {}) {
     return Object.entries(where).every(([key, value]) => {
@@ -56,6 +56,7 @@ export function createFixture() {
       if (!row) throw new Error(`Missing fixture ${model}`);
       Object.assign(row, data); return structuredClone(row);
     },
+    delete: async ({ where }) => { const index = state[model].findIndex((r) => matches(r, where)); if (index < 0) throw new Error("Missing fixture row"); return state[model].splice(index, 1)[0]; },
     updateMany: async ({ where, data }) => {
       const rows = state[model].filter((r) => matches(r, where));
       rows.forEach((r) => Object.assign(r, data)); return { count: rows.length };
