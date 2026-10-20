@@ -10,6 +10,8 @@ import { DEFAULT_CLIENT_EMAIL_MESSAGE, DEFAULT_CLIENT_EMAIL_SUBJECT } from "../l
 import { applyPlaceholders } from "../lib/email-template";
 import { ARTWORK_TAG, CASE_STATUSES, acceptsBat, currentProofs, snapshotPersonalization, summarizeCase } from "../lib/artwork-status";
 import { ensureProductionCards, event, indexCases, invalidateProofs, metadata, readDossier, reconcileCase, searchDrafts, setArtworkTag, upsertCase } from "../lib/artwork-cases.server";
+import { copyPersonalization, personalizationLabel } from "../lib/personalization";
+import { noteAddedMarking, reopenProduction } from "../lib/artwork-production.server";
 import { WORKSPACE_STYLES } from "../lib/workspace-styles";
 
 export const loader = async ({ request }) => {
@@ -116,19 +118,22 @@ export const action = async ({ request }) => {
       const item = await prisma.artworkItem.findFirst({ where: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: existing?.lineItemId || str(fd, "lineItemId"), isActive: true } });
       if (!item || item.requirement !== "required") throw new Error("Sélectionne d’abord « BAT requis » pour cet article.");
       if (specs.quantity > item.quantity) throw new Error(`La quantité personnalisée ne peut pas dépasser ${item.quantity}, quantité du devis.`);
-      const uploads = await proofFiles(admin, fd); const logo = await logoFile(admin, fd);
       const reuseId = str(fd, "reuseId");
-      if (!logo.logoUrl && reuseId) {
-        const source = await prisma.personalization.findFirst({ where: { id: reuseId, shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } });
-        if (source) Object.assign(logo, { logoUrl: source.logoUrl, logoMimeType: source.logoMimeType, logoFileName: source.logoFileName });
-      }
+      const source = reuseId ? await prisma.personalization.findFirst({ where: { id: reuseId, shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } }) : null;
+      if (reuseId && !source) throw new Error("La personnalisation source n’est plus disponible. Actualise le dossier.");
+      if (str(fd, "duplicateSourceId") && (existing || source?.id !== str(fd, "duplicateSourceId") || source.lineItemId !== item.lineItemId)) throw new Error("La duplication doit rester sur le même article.");
+      const uploads = await proofFiles(admin, fd); const logo = await logoFile(admin, fd);
+      if (!logo.logoUrl && source) Object.assign(logo, { logoUrl: source.logoUrl, logoMimeType: source.logoMimeType, logoFileName: source.logoFileName });
       await prisma.$transaction(async (tx) => {
-        const p = existing ? await tx.personalization.update({ where: { id: existing.id }, data: { ...specs, ...logo } }) : await tx.personalization.create({ data: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId, variantId: item.variantId, sourceQuantity: item.quantity, productTitle: item.title, ...specs, ...logo } });
-        if (existing && ["type", "quantity", "dimensions", "color", "location", "customText", "logoUrl"].some((k) => p[k] !== existing[k])) {
-          await invalidateProofs(tx, p, dossier.id, `Caractéristiques modifiées : ${p.productTitle}.`);
+        const p = existing ? await tx.personalization.update({ where: { id: existing.id }, data: { ...specs, ...logo } }) : await tx.personalization.create({ data: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId, variantId: item.variantId, sourceQuantity: item.quantity, productTitle: item.title, size: source?.size || null, ...specs, ...logo } });
+        const changedSpecs = existing && ["type", "quantity", "dimensions", "color", "location", "customText", "logoUrl"].some((k) => p[k] !== existing[k]);
+        if (changedSpecs) {
+          await invalidateProofs(tx, p, dossier.id, `Caractéristiques modifiées : ${personalizationLabel(p)}.`);
         }
+        if (existing && uploads.length && !changedSpecs) await reopenProduction(tx, p, dossier.id);
+        if (!existing) await noteAddedMarking(tx, p, dossier.id);
         for (const upload of uploads) await tx.proof.create({ data: { personalizationId: p.id, ...upload, snapshot: snapshotPersonalization(p) } });
-        await event(dossier.id, `${existing ? "Personnalisation modifiée" : "Personnalisation préparée"} : ${p.productTitle}${uploads.length ? `, ${uploads.length} BAT enregistré(s)` : ""}.`, "Équipe", tx);
+        await event(dossier.id, `${existing ? "Personnalisation modifiée" : "Personnalisation préparée"} : ${personalizationLabel(p)}${uploads.length ? `, ${uploads.length} BAT enregistré(s)` : ""}.`, "Équipe", tx);
       });
       await ensureProductionCards(session.shop, dossier.draftOrderId);
       return { success: true, message: "Personnalisation et fichiers enregistrés" };
@@ -139,7 +144,10 @@ export const action = async ({ request }) => {
       const targets = await prisma.artworkItem.findMany({ where: { id: { in: ids }, shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true, requirement: "required", NOT: { lineItemId: source.lineItemId } } });
       if (!targets.length) throw new Error("Choisis au moins un autre article avec BAT requis.");
       await prisma.$transaction(async (tx) => {
-        for (const target of targets) await tx.personalization.create({ data: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: target.lineItemId, variantId: target.variantId, sourceQuantity: target.quantity, productTitle: target.title, quantity: target.quantity, type: source.type, dimensions: source.dimensions, color: source.color, location: source.location, customText: source.customText, logoUrl: source.logoUrl, logoMimeType: source.logoMimeType, logoFileName: source.logoFileName } });
+        for (const target of targets) {
+          const p = await tx.personalization.create({ data: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: target.lineItemId, variantId: target.variantId, sourceQuantity: target.quantity, productTitle: target.title, ...copyPersonalization(source, target) } });
+          await noteAddedMarking(tx, p, dossier.id);
+        }
         await event(dossier.id, `Paramètres et logo copiés sur ${targets.length} article(s). Chaque BAT reste à préparer.`, "Équipe", tx);
       });
       await ensureProductionCards(session.shop, dossier.draftOrderId);
@@ -151,9 +159,10 @@ export const action = async ({ request }) => {
       const old = intent === "revise-proof" ? p.proofs.find((proof) => proof.id === str(fd, "proofId") && proof.isCurrent) : null;
       if (intent === "revise-proof" && (!old || uploads.length !== 1)) throw new Error("Choisis un seul fichier pour remplacer ce BAT.");
       await prisma.$transaction(async (tx) => {
+        await reopenProduction(tx, p, dossier.id);
         if (old) { const retired = await tx.proof.updateMany({ where: { id: old.id, isCurrent: true }, data: { isCurrent: false } }); if (!retired.count) throw new Error("Ce BAT a déjà été remplacé. Actualise le dossier."); }
         for (const upload of uploads) await tx.proof.create({ data: { personalizationId: p.id, ...upload, snapshot: snapshotPersonalization(p), version: old ? old.version + 1 : 1, supersedesId: old?.id || null } });
-        await event(dossier.id, `${old ? `BAT V${old.version + 1}` : "BAT"} enregistré : ${p.productTitle}. À envoyer au client.`, "Équipe", tx);
+        await event(dossier.id, `${old ? `BAT V${old.version + 1}` : "BAT"} enregistré : ${personalizationLabel(p)}. À envoyer au client.`, "Équipe", tx);
       });
       return { success: true, message: "BAT enregistré. Il reste à l’envoyer au client." };
     }
@@ -164,7 +173,7 @@ export const action = async ({ request }) => {
       await prisma.$transaction(async (tx) => {
         const approved = await tx.proof.updateMany({ where: { id: proof.id, isCurrent: true, status: "en_attente" }, data: { status: "approuve", reponduLe: new Date(), approvedVia: via } });
         if (!approved.count) throw new Error("Ce BAT a changé. Actualise le dossier avant de le valider.");
-        await event(dossier.id, `BAT V${proof.version} validé par ${via} : ${p.productTitle}.`, "Équipe", tx);
+        await event(dossier.id, `BAT V${proof.version} validé par ${via} : ${personalizationLabel(p)}.`, "Équipe", tx);
       });
       return { success: true, message: "Validation enregistrée" };
     }
@@ -183,7 +192,7 @@ export const action = async ({ request }) => {
       const settings = await prisma.shopSettings.findUnique({ where: { shop: session.shop } });
       // eslint-disable-next-line no-undef
       const reviewUrl = `${process.env.SHOPIFY_APP_URL}/proof-review?tokens=${pending.map((p) => p.token).join(",")}`;
-      await sendProofValidationEmail({ to: customerEmail, orderName: `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, items: pending.map((p) => `${p.personalization.productTitle}, BAT V${p.version}`), reviewUrl, subjectTemplate: settings?.clientEmailSubject, messageTemplate: settings?.clientEmailMessage });
+      await sendProofValidationEmail({ to: customerEmail, orderName: `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, items: pending.map((p) => `${personalizationLabel(p.personalization, { english: true })}, BAT V${p.version}`), reviewUrl, subjectTemplate: settings?.clientEmailSubject, messageTemplate: settings?.clientEmailMessage });
       await prisma.$transaction(async (tx) => {
         await tx.proof.updateMany({ where: { id: { in: pending.map((p) => p.id) }, isCurrent: true, status: "en_attente" }, data: { envoyeLe: new Date() } });
         await event(dossier.id, `${mode === "reminder" ? "Relance" : "Envoi"} à ${customerEmail} : ${pending.length} BAT.`, "Équipe", tx);
@@ -224,17 +233,18 @@ function AddCase({ onClose, onOpen }) {
     {fetcher.data?.pageInfo?.hasNextPage && <fetcher.Form method="post"><input type="hidden" name="intent" value="search-drafts"/><input type="hidden" name="query" value={fetcher.data.searchQuery || ""}/><input type="hidden" name="after" value={fetcher.data.pageInfo.endCursor}/><button className="aw-button">Résultats suivants</button></fetcher.Form>}
   </section>;
 }
-function PersonalizationEditor({ dossier, item, p = null, onClose }) {
-  const [reuse, setReuse] = useState(null); const source = reuse || p;
-  return <section className="aw-editor"><div className="aw-between"><h3>{p ? "Modifier la personnalisation" : "Préparer une personnalisation"}</h3><button className="aw-button" onClick={() => { if (window.confirm("Fermer ce formulaire ? Les changements non enregistrés seront perdus.")) onClose(); }}>Fermer</button></div>
-    {!p && dossier.personalizations.some((row) => row.logoUrl) && <label>Réutiliser un logo et des paramètres<select value={reuse?.id || ""} onChange={(e) => setReuse(dossier.personalizations.find((row) => row.id === e.target.value) || null)}><option value="">Nouvelle personnalisation</option>{dossier.personalizations.filter((row) => row.logoUrl).map((row) => <option key={row.id} value={row.id}>{row.productTitle} · {row.type} · {row.location}</option>)}</select></label>}
+function PersonalizationEditor({ dossier, item, p = null, duplicate = null, onClose }) {
+  const [reuse, setReuse] = useState(duplicate); const source = reuse || p;
+  return <section className="aw-editor"><div className="aw-between"><h3>{p ? "Modifier la personnalisation" : duplicate ? "Dupliquer cette personnalisation" : "Préparer une personnalisation"}</h3><button className="aw-button" onClick={() => { if (window.confirm("Fermer ce formulaire ? Les changements non enregistrés seront perdus.")) onClose(); }}>Fermer</button></div>
+    {!p && <p className="aw-notice">{duplicate ? "Les caractéristiques et le logo sont repris. Modifie les champs souhaités avant d’enregistrer. " : "Chaque marquage possède ses propres caractéristiques. "}Les BAT, validations et états de production ne sont pas copiés.</p>}
+    {!p && !duplicate && dossier.personalizations.length > 0 && <label>Réutiliser un logo et des paramètres<select value={reuse?.id || ""} onChange={(e) => { if (document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Changer de modèle et perdre les modifications non enregistrées ?")) return; setReuse(dossier.personalizations.find((row) => row.id === e.target.value) || null); }}><option value="">Nouvelle personnalisation</option>{dossier.personalizations.map((row) => <option key={row.id} value={row.id}>{personalizationLabel(row)}</option>)}</select></label>}
     <WorkflowForm key={reuse?.id || p?.id || "new"} intent="save-personalization" caseId={dossier.id} label="Enregistrer la personnalisation et les fichiers" onDone={onClose}>
-      <input type="hidden" name="personalizationId" value={p?.id || ""}/><input type="hidden" name="lineItemId" value={item.lineItemId}/><input type="hidden" name="reuseId" value={reuse?.id || ""}/>
+      <input type="hidden" name="personalizationId" value={p?.id || ""}/><input type="hidden" name="lineItemId" value={item.lineItemId}/><input type="hidden" name="reuseId" value={reuse?.id || ""}/><input type="hidden" name="duplicateSourceId" value={duplicate?.id || ""}/>
       <div className="aw-grid"><label>Technique<select name="type" defaultValue={source?.type || "Broderie"}>{["Broderie", "Impression", "Gravure", "Sérigraphie"].map((t) => <option key={t}>{t}</option>)}</select></label>
-        <label>Quantité personnalisée<input type="number" name="quantity" min="1" max={item.quantity} required defaultValue={p?.quantity || item.quantity}/></label>
+        <label>Quantité personnalisée <small>Pièces concernées par ce marquage ; les mêmes pièces peuvent recevoir plusieurs marquages.</small><input type="number" name="quantity" min="1" max={item.quantity} required defaultValue={p?.quantity || (source ? copyPersonalization(source, item, { sameItem: source.lineItemId === item.lineItemId }).quantity : item.quantity)}/></label>
         <label>Dimensions du marquage<input name="dimensions" placeholder="Ex. largeur 80 mm × hauteur 35 mm" defaultValue={source?.dimensions || ""}/></label>
         <label>Couleur du marquage<input name="color" placeholder="Ex. bleu marine, fil Madeira 1243" defaultValue={source?.color || ""}/></label>
-        <label>Emplacement<select name="location" defaultValue={source?.location || "Poitrine gauche"}>{["Poitrine gauche", "Poitrine droite", "Manche", "Dos", "Autre"].map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>Emplacement<select name="location" defaultValue={source?.location || "Poitrine gauche"}>{source?.location && !["Poitrine gauche", "Poitrine droite", "Manche", "Dos", "Autre"].includes(source.location) && <option>{source.location}</option>}{["Poitrine gauche", "Poitrine droite", "Manche", "Dos", "Autre"].map((v) => <option key={v}>{v}</option>)}</select></label>
         <label>Texte à personnaliser<input name="customText" defaultValue={source?.customText || ""}/></label></div>
       {p?.size && <p className="aw-muted">Ancienne information taille / dimensions : {p.size}</p>}
       <label>Logo source <small>Image, PDF, AI ou EPS, 20 Mo maximum. {source?.logoUrl ? "Logo existant conservé si aucun fichier n’est choisi." : ""}</small><input type="file" name="logo" accept="image/*,.pdf,.ai,.eps"/></label>
@@ -247,7 +257,7 @@ function ProofView({ proof, p, caseId, readOnly }) {
   const [mode, setMode] = useState(null); const pdf = proof.mimeType === "application/pdf" || /\.pdf(?:\?|$)/i.test(proof.imageUrl);
   return <article className={`aw-proof ${!proof.isCurrent ? "historic" : ""}`}>
     <div className="aw-between"><strong>BAT V{proof.version}{!proof.isCurrent ? " · historique" : ""}</strong><span className="aw-badge">{proof.status === "approuve" ? "Validé" : proof.status === "modification_demandee" ? "À corriger" : proof.envoyeLe ? "En attente du client" : "À envoyer"}</span></div>
-    <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Ouvrir le BAT PDF ↗</span> : <img src={proof.imageUrl} alt={`BAT V${proof.version} de ${p.productTitle}`} loading="lazy"/>}</a>
+    <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Ouvrir le BAT PDF ↗</span> : <img src={proof.imageUrl} alt={`BAT V${proof.version} de ${personalizationLabel(p)}`} loading="lazy"/>}</a>
     <p className="aw-muted">{proof.fileName || "Fichier BAT"}</p>{proof.snapshot && !proof.isCurrent && <details><summary>Caractéristiques de cette version</summary><p>{[proof.snapshot.productTitle, proof.snapshot.type, `${proof.snapshot.quantity} pièce(s)`, proof.snapshot.dimensions || proof.snapshot.size, proof.snapshot.color, proof.snapshot.location, proof.snapshot.customText].filter(Boolean).join(" · ")}</p></details>}{proof.commentaireClient && <blockquote>{proof.commentaireClient}</blockquote>}
     {proof.envoyeLe && <small>Dernier envoi : {date(proof.envoyeLe)}</small>}{proof.reponduLe && <small>Réponse : {date(proof.reponduLe)}{proof.approvedVia ? ` · ${proof.approvedVia}` : ""}</small>}
     {!readOnly && proof.isCurrent && <div className="aw-toolbar"><button className="aw-button" onClick={() => setMode(mode === "revise" ? null : "revise")}>Nouvelle version</button>{proof.status === "en_attente" && <button className="aw-button" onClick={() => setMode(mode === "approve" ? null : "approve")}>Validation reçue ailleurs</button>}</div>}
@@ -258,12 +268,13 @@ function ProofView({ proof, p, caseId, readOnly }) {
   </article>;
 }
 function PersonalizationView({ p, dossier, item }) {
-  const [editing, setEditing] = useState(false); const [copy, setCopy] = useState(false);
+  const [editing, setEditing] = useState(false); const [duplicating, setDuplicating] = useState(false); const [copy, setCopy] = useState(false);
   const current = currentProofs(p); const history = p.proofs.filter((pr) => !pr.isCurrent);
-  return <section className="aw-personalization"><div className="aw-between"><h3>{p.type} · {p.quantity} pièce(s)</h3>{!dossier.archivedAt && item.requirement === "required" && <div className="aw-toolbar"><button className="aw-button" onClick={() => { if (editing && document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Fermer sans enregistrer les modifications ?")) return; setEditing(!editing); }}>Modifier</button><button className="aw-button" onClick={() => setCopy(!copy)}>Copier sur des articles</button></div>}</div>
+  return <section className="aw-personalization"><div className="aw-between"><h3>{personalizationLabel(p, { product: false })} · {p.quantity} pièce(s)</h3>{!dossier.archivedAt && item.requirement === "required" && <div className="aw-toolbar"><button className="aw-button" onClick={() => { if (editing && document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Fermer sans enregistrer les modifications ?")) return; setEditing(!editing); }}>Modifier</button><button className="aw-button" onClick={() => setDuplicating(true)}>Dupliquer cette personnalisation</button><button className="aw-button" onClick={() => setCopy(!copy)}>Copier sur des articles</button></div>}</div>
     <p>{[p.dimensions, p.color, p.location, p.customText].filter(Boolean).join(" · ") || "Caractéristiques à compléter"}</p>
     {p.logoUrl && <a href={p.logoUrl} target="_blank" rel="noreferrer">Ouvrir le logo source ↗</a>}
     {editing && <PersonalizationEditor dossier={dossier} item={item} p={p} onClose={() => setEditing(false)}/>}
+    {duplicating && <PersonalizationEditor dossier={dossier} item={item} duplicate={p} onClose={() => setDuplicating(false)}/>}
     {copy && <WorkflowForm intent="copy-personalization" caseId={dossier.id} label="Copier les paramètres et le logo" onDone={() => setCopy(false)}><input type="hidden" name="personalizationId" value={p.id}/><p>Les BAT et les validations ne sont pas copiés.</p>{dossier.items.filter((i) => i.requirement === "required" && i.lineItemId !== p.lineItemId).map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="targetItemId" value={i.id}/>{i.title} · {i.variantTitle} · {i.quantity} pièce(s)</label>)}</WorkflowForm>}
     {!current.length && <p className="aw-notice">Aucun BAT préparé. Ce marquage ne peut pas encore être validé.</p>}
     <div className="aw-proof-grid">{current.map((proof) => <ProofView key={proof.id} proof={proof} p={p} caseId={dossier.id} readOnly={Boolean(dossier.archivedAt) || item.requirement !== "required"}/>)}</div>
@@ -274,7 +285,7 @@ function PersonalizationView({ p, dossier, item }) {
 function SendPreview({ dossier, mode, subject, message }) {
   const [open, setOpen] = useState(false);
   const requiredIds = dossier.items.filter((i) => i.requirement === "required").map((i) => i.lineItemId);
-  const proofs = dossier.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, productTitle: p.productTitle })));
+  const proofs = dossier.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, productTitle: personalizationLabel(p, { english: true }) })));
   if (!proofs.length) return null;
   const summary = summarizeCase(dossier.items, dossier.personalizations); const blocked = summary.missing || summary.pendingQualification;
   const name = `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`;
@@ -304,6 +315,7 @@ function DossierView({ dossier, shop, emailSubject, emailMessage }) {
       {dossier.items.map((item) => <section key={item.id} className="aw-panel"><div className="aw-between"><div><h2>{item.title}</h2><p className="aw-muted">Variante / taille du vêtement : {item.variantTitle || "Non renseignée"} · Quantité Shopify : {item.quantity}{item.sku ? ` · Réf. ${item.sku}` : ""}</p></div><span className="aw-badge">{item.requirement === "required" ? "BAT requis" : item.requirement === "none" ? "Sans BAT requis" : "À qualifier"}</span></div>
         {!dossier.archivedAt && <WorkflowForm intent="set-requirement" caseId={dossier.id} label="Appliquer" className="aw-inline-form"><input type="hidden" name="itemId" value={item.id}/><label>Suivi de cet article<select key={item.requirement} name="requirement" defaultValue={item.requirement}><option value="pending">À qualifier</option><option value="required">BAT requis</option><option value="none">Sans BAT requis</option></select></label></WorkflowForm>}
         {item.requirement !== "required" && <p className="aw-muted">{item.requirement === "none" ? "Cet article n’entre pas dans la validation des BAT." : "Décide si cet article nécessite un artwork."}</p>}
+        {item.requirement === "required" && <p className="aw-muted">{dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId).length} personnalisation(s) sur cet article. Les quantités de marquage ne s’additionnent pas aux pièces à livrer.</p>}
         {dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId).map((p) => <PersonalizationView key={p.id} p={p} item={item} dossier={dossier}/>)}
         {item.requirement === "required" && !dossier.archivedAt && <button className="aw-button" onClick={() => setEditor(item.id)}>Ajouter une personnalisation</button>}
         {editor === item.id && <PersonalizationEditor dossier={dossier} item={item} onClose={() => setEditor(null)}/>}

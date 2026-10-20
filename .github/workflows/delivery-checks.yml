@@ -53,7 +53,7 @@ jobs:
         run: |
           mkdir -p test-results
           set -o pipefail
-          node --test app/lib/*.test.js | tee test-results/tests.txt
+          node --test app/lib/*.test.js tests/artwork/workflow.test.mjs | tee test-results/tests.txt
       - name: Production build
         run: npm run build
       - name: Browser test dependencies
@@ -71,6 +71,7 @@ jobs:
           npm run start > test-results/server.log 2>&1 &
           for i in $(seq 1 30); do curl -fsS http://localhost:3000/delivery >/dev/null && break; sleep 1; done
           node scripts/delivery-browser-check.mjs
+          node scripts/artwork-browser-check.mjs
           rm -f test-results/ui-fixture.json
       - name: Preserve tested dependencies and formatting
         if: github.event_name == 'push' && github.ref == 'refs/heads/feature/delivery-notes-en'

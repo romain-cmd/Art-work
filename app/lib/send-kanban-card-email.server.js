@@ -1,3 +1,4 @@
+import { personalizationFileName, personalizationLabel } from "./personalization";
 import { currentProofs, fileExtension, isPersonalizationApproved } from "./artwork-status";
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
@@ -22,7 +23,7 @@ export async function sendKanbanCardEmail({
   subjectTemplate,
   messageTemplate,
 }) {
-  const vars = { orderName, productTitle: item.productTitle };
+  const vars = { orderName, productTitle: personalizationLabel(item) };
   const subject = applyPlaceholders(
     subjectTemplate || DEFAULT_PARTNER_EMAIL_SUBJECT,
     vars
@@ -54,16 +55,16 @@ export async function sendKanbanCardEmail({
 
   const attachments = [];
   if (item.logoUrl) {
-    attachments.push({ filename: item.logoFileName || `logo-${item.productTitle}${fileExtension(item.logoMimeType, item.logoUrl)}`, path: item.logoUrl });
+    attachments.push({ filename: personalizationFileName(item, item.logoFileName || `logo${fileExtension(item.logoMimeType, item.logoUrl)}`), path: item.logoUrl });
   }
   for (const proof of approvedProofs) {
-    attachments.push({ filename: proof.fileName || `BAT-${item.productTitle}-V${proof.version}${fileExtension(proof.mimeType, proof.imageUrl)}`, path: proof.imageUrl });
+    attachments.push({ filename: personalizationFileName(item, proof.fileName || `BAT-V${proof.version}${fileExtension(proof.mimeType, proof.imageUrl)}`), path: proof.imageUrl });
   }
 
   const html = `
     <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
       <h2>Détails de production — ${escapeHtml(orderName)}</h2>
-      <h3 style="margin:0 0 8px;">${escapeHtml(item.productTitle)}</h3>
+      <h3 style="margin:0 0 8px;">${escapeHtml(personalizationLabel(item))}</h3>
       ${message ? `<p>${escapeHtml(message)}</p>` : ""}
       ${specRows}
       <p style="margin-top:16px;color:#555;">
