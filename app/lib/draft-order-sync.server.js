@@ -56,7 +56,7 @@ export const DRAFT_LINE_ITEMS_QUERY = `#graphql
     draftOrder(id: $id) {
       id
       lineItems(first: 250, after: $after) {
-        edges { node { id title quantity custom variant { id title sku } } }
+        edges { node { id title quantity custom variant { id title sku product { id } selectedOptions { name value } } } }
         pageInfo { hasNextPage endCursor }
       }
     }

@@ -6,11 +6,17 @@ import { fixtureServer } from "../tests/artwork/fixture.mjs";
 
 const { chromium } = await import(process.env.ARTWORK_PLAYWRIGHT_MODULE || "playwright");
 const env = await fixtureServer();
-const routeFor = (path) => path.startsWith("/app/kanban") ? env.routes.production : path.startsWith("/proof-review") ? env.routes.review : env.routes.artwork;
+const routeFor = (path) => path.startsWith("/app/artwork-summary") ? env.routes.adminSummary : path.startsWith("/proof-review/summary") ? env.routes.publicSummary : path.startsWith("/app/kanban") ? env.routes.production : path.startsWith("/proof-review") ? env.routes.review : env.routes.artwork;
 const http = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/@vite/client") { res.setHeader("Content-Type", "application/javascript"); res.end("export const createHotContext=()=>({accept(){},dispose(){},invalidate(){},on(){},send(){}});export const injectQuery=(url)=>url;"); return; }
+    if (["/app/artwork-summary", "/proof-review/summary"].includes(url.pathname)) {
+      const response = await routeFor(url.pathname).loader({ request: new Request(`http://localhost${req.url}`) });
+      res.statusCode = response.status;
+      for (const [key, value] of response.headers) res.setHeader(key, value);
+      res.end(Buffer.from(await response.arrayBuffer())); return;
+    }
     if (url.pathname === "/test/data" || url.pathname === "/test/action") {
       const path = url.searchParams.get("path");
       let body;
@@ -33,6 +39,7 @@ await mkdir("test-results/artwork", { recursive: true });
 try {
   for (const width of [1440, 390]) {
     env.reset();
+    env.fixture.state.artworkItem.push({ ...env.fixture.state.artworkItem[0], id: "large", lineItemId: "line-L", variantId: "variant-L", variantTitle: "Navy / L", sizeLabel: "L", quantity: 30, requirement: "pending" });
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     page.setDefaultTimeout(10000);
     const errors = [];
@@ -48,28 +55,53 @@ try {
     await editor.locator('[name="location"]').selectOption("Dos");
     await page.screenshot({ path: `test-results/artwork/${width}-duplicate.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow");
-    await editor.getByRole("button", { name: "Enregistrer la personnalisation et les fichiers" }).click();
+    await editor.getByRole("button", { name: "Enregistrer la personnalisation" }).click();
     await editor.waitFor({ state: "hidden" });
-    assert.equal(await page.locator(".aw-personalization").count(), 2);
-    const back = page.locator(".aw-personalization").filter({ has: page.getByRole("heading", { name: /Impression · Dos/ }) });
-    await back.getByText("Ajouter un BAT / une vue supplémentaire", { exact: true }).click();
-    await back.locator('[name="proofImages"]').setInputFiles({ name: "back.png", mimeType: "image/png", buffer: Buffer.from("fixture") });
-    await back.getByRole("button", { name: "Enregistrer les BAT", exact: true }).click();
-    await back.getByText("À envoyer", { exact: true }).waitFor();
+    assert.equal(await page.locator(".aw-personalization").filter({ has: page.getByRole("button", { name: "Dupliquer cette personnalisation", exact: true }) }).count(), 2);
+    await page.getByRole("button", { name: "Modifier les marquages associés", exact: true }).click();
+    const associations = page.locator('.aw-proof form').filter({ has: page.locator('[name="intent"][value="link-proof"]') });
+    const choices = associations.locator('[name="markingId"]');
+    for (let i = 0; i < await choices.count(); i++) await choices.nth(i).check();
+    await associations.locator('[name="groupItemId"][value="large"]').check();
+    await associations.getByRole("button", { name: "Enregistrer la nouvelle version" }).click();
+    await associations.waitFor({ state: "hidden" });
+    assert.equal(env.fixture.state.proof.filter((p) => p.isCurrent).length, 1, "one artwork record for all markings and sizes");
     await page.getByRole("button", { name: "Envoyer 1 BAT au client" }).click();
     await page.getByRole("button", { name: "Confirmer l’envoi" }).click();
     await page.getByRole("button", { name: "Relancer le client" }).waitFor();
-    const second = env.fixture.state.proof.find((p) => p.personalizationId !== "marking-chest001");
+    const second = env.fixture.state.proof.find((p) => p.isCurrent);
     await page.goto(`${base}/proof-review?tokens=${second.token}`);
+    await page.getByRole("heading", { name: /Polo · 2 marking/ }).waitFor();
     await page.getByRole("heading", { name: /Print · Back/ }).waitFor();
+    await page.getByRole("heading", { name: /Embroidery · Left chest/ }).waitFor();
+    assert.equal(await page.locator('.pr-card .pr-image').count(), 1);
+    await page.getByText("Total articles: 50", { exact: true }).waitFor();
+    const download = page.waitForEvent("download");
+    await page.getByRole("link", { name: "Download size summary (PDF)" }).click();
+    const pdf = await download;
+    await pdf.saveAs(`test-results/artwork/${width}-size-summary.pdf`);
     await page.screenshot({ path: `test-results/artwork/${width}-client.png`, fullPage: true });
     const approve = page.getByRole("button", { name: /Approve/ }).first();
     await approve.click();
     await page.getByText("✓ Approved", { exact: true }).first().waitFor();
     await page.goto(`${base}/app/kanban`);
-    await page.getByRole("heading", { name: /Impression · Dos/ }).waitFor();
+    await page.getByRole("heading", { name: /Impression · Dos/ }).first().waitFor();
     await page.screenshot({ path: `test-results/artwork/${width}-production.png`, fullPage: true });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.goto(`${base}/app/personnalisation?case=case`);
+    await page.getByRole("button", { name: "Remplacer l’artwork", exact: true }).first().click();
+    const replacement = page.locator('.aw-proof form').filter({ has: page.locator('[name="intent"][value="revise-proof"]') });
+    await replacement.locator('[name="proofImages"]').setInputFiles({ name: "common-new.png", mimeType: "image/png", buffer: Buffer.from("fixture") });
+    await replacement.getByRole("button", { name: "Enregistrer la nouvelle version" }).click();
+    await replacement.waitFor({ state: "hidden" });
+    await page.getByText("common-new.png", { exact: true }).first().waitFor();
+    await page.screenshot({ path: `test-results/artwork/${width}-common-revised.png`, fullPage: true });
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Supprimer l’artwork", exact: true }).first().click();
+    await page.getByText("Ce marquage reste à associer à un artwork dans la section ci-dessous.", { exact: true }).first().waitFor();
+    assert.equal(env.fixture.state.proof.filter((p) => p.isCurrent).length, 0);
+    await page.goto(`${base}/proof-review?tokens=${second.token}`);
+    assert.equal(await page.getByRole("button", { name: /Approve/ }).count(), 0);
     assert.deepEqual(errors, []);
     await page.close();
     console.log(`Artwork browser workflow passed at ${width}px`);

@@ -1,7 +1,7 @@
-import { reopenProduction } from "./artwork-production.server";
-import { personalizationLabel } from "./personalization";
+import { variantDetails } from "./artwork-groups.js";
+import { invalidateArtworks } from "./shared-artwork.server";
 import prisma from "../db.server";
-import { ARTWORK_TAG, snapshotPersonalization } from "./artwork-status";
+import { ARTWORK_TAG } from "./artwork-status";
 import { fetchDraftLineItems, syncDraftPersonalizations } from "./draft-order-sync.server";
 
 export const DRAFT_FIELDS = `id name email createdAt updatedAt status tags shippingAddress { company firstName lastName } billingAddress { firstName lastName } order { id name }`;
@@ -67,15 +67,7 @@ export async function indexCases(admin, shop, force = false) {
   await prisma.shopSettings.upsert({ where: { shop }, create: { shop, artworkIndexedAt: new Date() }, update: { artworkIndexedAt: new Date() } });
 }
 export async function invalidateProofs(db, personalization, caseId, reason) {
-  await reopenProduction(db, personalization, caseId);
-  const oldProofs = await db.proof.findMany({ where: { personalizationId: personalization.id, isCurrent: true } });
-  for (const old of oldProofs) {
-    const retired = await db.proof.updateMany({ where: { id: old.id, isCurrent: true }, data: { isCurrent: false } });
-    if (!retired.count) continue;
-    await db.proof.create({ data: { personalizationId: personalization.id, imageUrl: old.imageUrl, mimeType: old.mimeType,
-      fileName: old.fileName, version: old.version + 1, supersedesId: old.id, snapshot: snapshotPersonalization(personalization) } });
-  }
-  if (oldProofs.length) await event(caseId, reason + " Nouvelle validation requise.", "Équipe", db);
+  await invalidateArtworks(db, [personalization], caseId, reason);
 }
 export async function reconcileCase(admin, shop, draft) {
   const dossier = await upsertCase(shop, draft);
@@ -86,25 +78,27 @@ export async function reconcileCase(admin, shop, draft) {
   await prisma.$transaction(async (tx) => {
     await tx.artworkItem.updateMany({ where: { shop, draftOrderId: draft.id }, data: { isActive: false } });
     const ps = await tx.personalization.findMany({ where: { shop, draftOrderId: draft.id, isActive: true } });
+    const updatedLines = new Set();
     for (const item of items) {
       const same = previousItems.filter((i) => i.variantId && i.variantId === item.variant?.id);
       const newSame = items.filter((i) => i.variant?.id && i.variant.id === item.variant?.id);
       const old = previousItems.find((i) => i.lineItemId === item.id) || (same.length === 1 && newSame.length === 1 ? same[0] : null);
       const hasPersonalization = ps.some((p) => p.lineItemId === item.id);
       const data = { title: item.title, variantId: item.variant?.id ?? null, variantTitle: item.variant?.title ?? null,
-        sku: item.variant?.sku ?? null, quantity: item.quantity, isActive: true };
+        ...variantDetails(item.variant), sku: item.variant?.sku ?? null, quantity: item.quantity, isActive: true };
+      if (old && Object.keys(data).some((key) => (old[key] ?? null) !== (data[key] ?? null))) updatedLines.add(item.id);
       await tx.artworkItem.upsert({ where: { shop_draftOrderId_lineItemId: { shop, draftOrderId: draft.id, lineItemId: item.id } },
         create: { shop, draftOrderId: draft.id, lineItemId: item.id, ...data, requirement: hasPersonalization ? "required" : old?.requirement || "pending" }, update: data });
     }
     for (const old of before) {
       if (!ps.some((p) => p.id === old.id)) await event(dossier.id, `Article retiré ou correspondance Shopify ambiguë : ${old.productTitle}. BAT conservés dans l’historique.`, "Shopify", tx);
     }
-    for (const p of ps) {
+    const changed = ps.filter((p) => {
       const prev = before.find((old) => old.id === p.id);
-      if (prev && (prev.quantity !== p.quantity || prev.productTitle !== p.productTitle)) {
-        await invalidateProofs(tx, p, dossier.id, `Article Shopify modifié : ${personalizationLabel(p)}.`);
-      }
-    }
+      return updatedLines.has(p.lineItemId) || prev && (prev.quantity !== p.quantity || prev.productTitle !== p.productTitle);
+    });
+    const removed = before.filter((p) => !ps.some((current) => current.id === p.id)).map((p) => ({ ...p, isActive: false }));
+    await invalidateArtworks(tx, [...changed, ...removed], dossier.id, "Articles Shopify modifiés.");
   });
   await ensureProductionCards(shop, draft.id);
   return dossier;

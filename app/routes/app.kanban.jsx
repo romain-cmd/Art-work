@@ -25,7 +25,7 @@ export const loader = async ({ request }) => {
     const dossier = dossiers.find((d) => d.draftOrderId === card.draftOrderId);
     const item = items.find((i) => i.lineItemId === p?.lineItemId && i.draftOrderId === card.draftOrderId);
     const summary = dossier && summarizeCase(items.filter((i) => i.draftOrderId === dossier.draftOrderId), personalizations.filter((p) => p.draftOrderId === dossier.draftOrderId));
-    return p && dossier && item?.requirement === "required" ? [{ card, p, dossier, blocked: summary.status !== "valide" || !isPersonalizationApproved(p) || !dossier.orderId }] : [];
+    return p && dossier && item?.requirement === "required" ? [{ card, p: { ...p, variantTitle: item.variantTitle, sizeLabel: item.sizeLabel, colorLabel: item.colorLabel, sku: item.sku }, dossier, blocked: summary.status !== "valide" || !isPersonalizationApproved(p) || !dossier.orderId }] : [];
   }), partners: Object.fromEntries(partners.map((p) => [p.type, p.email])) };
 };
 export const action = async ({ request }) => {
@@ -49,7 +49,7 @@ export const action = async ({ request }) => {
       const email = String(fd.get("partnerEmail") || "").trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Indique une adresse email valide.");
       const settings = await prisma.shopSettings.findUnique({ where: { shop: session.shop } });
-      await sendKanbanCardEmail({ to: email, orderName: `${card.orderName}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, item: p, subjectTemplate: settings?.partnerEmailSubject, messageTemplate: settings?.partnerEmailMessage });
+      await sendKanbanCardEmail({ to: email, orderName: `${card.orderName}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, item: { ...p, variantTitle: item.variantTitle, sku: item.sku }, subjectTemplate: settings?.partnerEmailSubject, messageTemplate: settings?.partnerEmailMessage });
       await prisma.kanbanCard.update({ where: { id: card.id }, data: { lastSentAt: new Date(), lastSentTo: email } });
       if (fd.get("rememberPartner") === "on") await prisma.partnerEmail.upsert({ where: { shop_type: { shop: session.shop, type: p.type } }, create: { shop: session.shop, type: p.type, email }, update: { email } });
       await event(dossier.id, `Production transmise à ${email} : ${personalizationLabel(p)}, ${p.proofs.length} BAT actuel(s) validé(s).`);
@@ -100,7 +100,7 @@ function ProductionCard({ row, partner, onDrag, onEnd }) {
   };
   const overdue = card.endDate && card.status !== "termine" && inputDate(card.endDate) < new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Paris" });
   return <article data-card-editor={card.id} className={`aw-production-card${overdue ? " overdue" : ""}${blocked ? " blocked" : ""}`} draggable={!blocked && !card.archivedAt && !mode} onDragStart={(e) => { e.dataTransfer.setData("text/plain", card.id); onDrag(card.id); }} onDragEnd={onEnd}>
-    <div className="aw-between"><strong>{dossier.yachtName || dossier.customerName || card.orderName}</strong><span className="aw-badge">{p.type}</span></div><h3>{personalizationLabel(p)}</h3><p className="aw-muted">{card.orderName} · {p.quantity} pièce(s)</p>
+    <div className="aw-between"><strong>{dossier.yachtName || dossier.customerName || card.orderName}</strong><span className="aw-badge">{p.type}</span></div><h3>{personalizationLabel(p)}</h3><p className="aw-muted">{card.orderName} · {p.variantTitle || "Variante non renseignée"} · {p.quantity} pièce(s)</p>
     <p>{[p.dimensions, p.color, p.location, p.customText].filter(Boolean).join(" · ")}</p>
     {blocked && <p className="aw-notice">Bloqué : dossier incomplet ou BAT actuel non validé. Qualifie les articles et valide tous les BAT du dossier avant production.</p>}
     <p className={overdue ? "aw-error" : "aw-muted"}>{card.endDate ? `${overdue ? "En retard · " : "Échéance : "}${date(card.endDate)}` : "Échéance non définie"}</p>
@@ -123,7 +123,7 @@ export default function Kanban() {
   const blocker = useBlocker(({ currentLocation, nextLocation }) => currentLocation.pathname !== nextLocation.pathname && Boolean(document.querySelector('[data-production-editor="dirty"]')));
   useEffect(() => { if (blocker.state === "blocked") { if (window.confirm("Quitter sans enregistrer les modifications de production ?")) blocker.proceed(); else blocker.reset(); } }, [blocker]);
   useEffect(() => { const timer = setInterval(() => { if (document.visibilityState === "visible" && !document.querySelector('[data-production-editor="dirty"]') && revalidator.state === "idle") revalidator.revalidate(); }, 45000); return () => clearInterval(timer); }, [revalidator]);
-  const visible = rows.filter(({ card, p, dossier }) => Boolean(card.archivedAt) === archived && (type === "all" || p.type === type) && `${card.orderName} ${personalizationLabel(p)} ${dossier.yachtName || ""} ${dossier.customerName || ""} ${card.lastSentTo || ""}`.toLowerCase().includes(q.toLowerCase())).sort((a, b) => (a.card.endDate ? new Date(a.card.endDate).getTime() : Infinity) - (b.card.endDate ? new Date(b.card.endDate).getTime() : Infinity) || new Date(a.card.createdAt) - new Date(b.card.createdAt));
+  const visible = rows.filter(({ card, p, dossier }) => Boolean(card.archivedAt) === archived && (type === "all" || p.type === type) && `${card.orderName} ${personalizationLabel(p)} ${p.variantTitle || ""} ${p.sku || ""} ${dossier.yachtName || ""} ${dossier.customerName || ""} ${card.lastSentTo || ""}`.toLowerCase().includes(q.toLowerCase())).sort((a, b) => (a.card.endDate ? new Date(a.card.endDate).getTime() : Infinity) - (b.card.endDate ? new Date(b.card.endDate).getTime() : Infinity) || new Date(a.card.createdAt) - new Date(b.card.createdAt));
   const drop = (status) => { if (dragged) { fetcher.submit({ intent: "move-card", cardId: dragged, status }, { method: "post" }); } setDragged(null); setOver(null); };
   return <s-page heading="Suivi de production"><style>{WORKSPACE_STYLES}</style><main className="aw-workspace"><h1>Suivi de production</h1><p className="aw-muted">Travaux des commandes Shopify, classés par échéance. Seuls les BAT actuels validés peuvent être transmis.</p>
     <section className="aw-panel"><div className="aw-toolbar"><label className="aw-grow">Rechercher<input value={q} onChange={(e) => updateFilter("q", e.target.value)} placeholder="Commande, yacht, client, produit ou partenaire"/></label><label>Technique<select value={type} onChange={(e) => updateFilter("type", e.target.value)}><option value="all">Toutes</option>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></label><button className="aw-button" onClick={() => updateFilter("archives", archived ? "" : "1")}>{archived ? "Voir les actifs" : "Archives"}</button><button className="aw-button" onClick={() => updateFilter("view", list ? "" : "list")}>{list ? "Vue tableau" : "Vue liste"}</button></div><p>{visible.length} travail(s) · {visible.filter((r) => r.blocked).length} bloqué(s)</p></section>
