@@ -1,4 +1,4 @@
-import { variantDetails } from "./artwork-groups.js";
+import { variantDetails, itemChangesAffectArtwork } from "./artwork-groups.js";
 import { invalidateArtworks } from "./shared-artwork.server";
 import prisma from "../db.server";
 import { ARTWORK_TAG } from "./artwork-status";
@@ -86,7 +86,7 @@ export async function reconcileCase(admin, shop, draft) {
       const hasPersonalization = ps.some((p) => p.lineItemId === item.id);
       const data = { title: item.title, variantId: item.variant?.id ?? null, variantTitle: item.variant?.title ?? null,
         ...variantDetails(item.variant), sku: item.variant?.sku ?? null, quantity: item.quantity, isActive: true };
-      if (old && Object.keys(data).some((key) => (old[key] ?? null) !== (data[key] ?? null))) updatedLines.add(item.id);
+      if (old && itemChangesAffectArtwork(old, data)) updatedLines.add(item.id);
       await tx.artworkItem.upsert({ where: { shop_draftOrderId_lineItemId: { shop, draftOrderId: draft.id, lineItemId: item.id } },
         create: { shop, draftOrderId: draft.id, lineItemId: item.id, ...data, requirement: hasPersonalization ? "required" : old?.requirement || "pending" }, update: data });
     }

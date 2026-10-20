@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
-import { artworkSummary, sizeSummary, variantDetails } from "./artwork-groups.js";
+import { artworkSummary, sizeSummary, variantDetails, itemChangesAffectArtwork } from "./artwork-groups.js";
 import { renderArtworkSummary } from "./artwork-summary-pdf.server.js";
 
 test("Shopify option names separate garment size from garment colour", () => {
@@ -26,4 +26,12 @@ test("size summary PDF handles long references, many variants and markings", asy
   assert.ok(pdf.length > 10000 && pdf.length < 2000000);
   await mkdir("test-results/artwork", { recursive: true });
   await writeFile("test-results/artwork/size-summary-multipage.pdf", pdf);
+});
+
+test("initial Shopify metadata enrichment preserves approvals but later changes require review", () => {
+  const before = { title: "Polo", variantTitle: "Navy / M", quantity: 20, productId: null, sizeLabel: null, colorLabel: null };
+  const enriched = { ...before, productId: "p", sizeLabel: "M", colorLabel: "Navy" };
+  assert.equal(itemChangesAffectArtwork(before, enriched), false);
+  assert.equal(itemChangesAffectArtwork(enriched, { ...enriched, colorLabel: "White" }), true);
+  assert.equal(itemChangesAffectArtwork(enriched, { ...enriched, quantity: 30 }), true);
 });

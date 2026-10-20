@@ -10,6 +10,15 @@ export function markingSignature(p) {
   return JSON.stringify(["type", "dimensions", "color", "location", "customText", "logoUrl"].map((key) => p[key] || ""));
 }
 
+export function itemChangesAffectArtwork(previous, next) {
+  const metadata = new Set(["productId", "sizeLabel", "colorLabel"]);
+  return Object.keys(next).some((key) => {
+    // First enrichment after the migration must not revoke existing approvals.
+    if (metadata.has(key) && previous[key] == null) return false;
+    return (previous[key] ?? null) !== (next[key] ?? null);
+  });
+}
+
 export function artworkSummary(proof) {
   const entries = proof.snapshot?.personalizations || proof.personalizations || [];
   const groups = new Map();
