@@ -39,7 +39,7 @@ export const action = async ({ request }) => {
   }
   if (decision === "modification_demandee" && fd.has("pointX")) {
     const x = Number(fd.get("pointX")); const y = Number(fd.get("pointY"));
-    if (![x, y].every((v) => Number.isInteger(v) && v >= 0 && v <= 100)) return { error: "Please place a point inside the artwork." };
+    if (!fd.has("pointY") || ![x, y].every((v) => Number.isInteger(v) && v >= 0 && v <= 100)) return { error: "Please place a point inside the artwork." };
     comment = `Point 1 (${x}% from left, ${y}% from top): ${comment}`;
   }
   const dossier = await prisma.artworkCase.findUnique({ where: { shop_draftOrderId: { shop: proof.personalization.shop, draftOrderId: proof.personalization.draftOrderId } } });

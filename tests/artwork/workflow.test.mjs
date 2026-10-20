@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fixtureServer } from "./fixture.mjs";
 import { builderFingerprint } from "../../app/lib/artwork-workspace.js";
+import { savePreparedArtwork } from "../../app/lib/artwork-builder.server.js";
 
 const env = await fixtureServer();
 test.after(() => env.server.close());
@@ -76,6 +77,24 @@ test("client corrections identify a marking and optionally a bounded point in th
   assert.equal(proof.status, "en_attente");
   assert.equal((await env.routes.review.action({ request: request(reply) })).success, true);
   assert.match(proof.commentaireClient, /Point 1 \(25% from left, 40% from top\): Embroidery · Left chest/);
+});
+
+test("guided preparation rolls back new markings when a prepared size conflicts", async () => {
+  freshBuilder(); const { state } = env.fixture;
+  state.personalization.push({ id: "existing-back", shop: "fixture-shop", draftOrderId: "draft", lineItemId: "line-L", variantId: "variant-L", productTitle: "Polo", quantity: 30, sourceQuantity: 30, type: "Impression", location: "Dos", isActive: true });
+  const before = structuredClone(state.personalization);
+  assert.equal((await env.routes.artwork.action({ request: request(builderData()) })).success, false);
+  assert.deepEqual(env.fixture.state.personalization, before);
+  assert.equal(env.fixture.state.proof.length, 0);
+  assert.equal(env.fixture.state.artworkItem[1].requirement, "pending");
+});
+
+test("guided preparation checks again after file uploads before changing the database", async () => {
+  freshBuilder(); const { state, db } = env.fixture; const data = builderData();
+  const selected = structuredClone(state.artworkItem);
+  state.artworkItem[0].quantity = 10;
+  await assert.rejects(savePreparedArtwork(db, { dossier: state.artworkCase[0], items: selected, existing: [], additions: [], files: [], expected: data.preparationFingerprint }), /changé pendant l’import/);
+  assert.equal(env.fixture.state.personalization.length, 0); assert.equal(env.fixture.state.proof.length, 0);
 });
 
 test("actual route actions: duplicate, validate, produce, revise independently", async () => {

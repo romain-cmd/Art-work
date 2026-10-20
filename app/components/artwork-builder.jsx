@@ -6,7 +6,8 @@ import { builderFingerprint, compactMarking, compatibleItems } from "../lib/artw
 const steps = ["Vêtements", "Marquages", "Artwork", "Vérification"];
 const newMarking = (items) => ({ key: crypto.randomUUID(), type: "Broderie", location: "Poitrine gauche", dimensions: "", color: "", customText: "", quantities: Object.fromEntries(items.map((i) => [i.id, i.quantity])) });
 
-export function ArtworkBuilder({ dossier, templates, initialItem, Form, onClose, onDone, markDirty }) {
+export function ArtworkBuilder({ dossier: liveDossier, templates, initialItem, Form, onClose, onDone, markDirty }) {
+  const dossier = useRef(liveDossier).current;
   const id = useId(); const ref = useRef(null); const titleRef = useRef(null);
   const [step, setStep] = useState(0); const [selectedIds, setSelectedIds] = useState(initialItem ? [initialItem.id] : []);
   const [baseId, setBaseId] = useState(initialItem?.id || "");
