@@ -1,6 +1,8 @@
 import { artworkSummary, sizeSummary } from "../lib/artwork-groups";
 import { artworkLabel, artworkMarkings } from "../lib/artwork-status";
 import { personalizationLabel } from "../lib/personalization";
+import { ProofReviewContent, REVIEW_STYLES } from "../components/proof-review-content";
+import { commentPoint } from "../lib/artwork-workspace";
 /* eslint-disable react/prop-types -- no PropTypes package in this project */
 import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -24,11 +26,22 @@ export const loader = async ({ request }) => {
 };
 
 export const action = async ({ request }) => {
-  const fd = await request.formData(); const token = String(fd.get("token") || ""); const decision = fd.get("decision"); const comment = String(fd.get("commentaireClient") || "").trim().slice(0, 4000);
+  const fd = await request.formData(); const token = String(fd.get("token") || ""); const decision = fd.get("decision"); let comment = String(fd.get("commentaireClient") || "").trim().slice(0, 3500);
   if (!["approuve", "modification_demandee"].includes(decision)) return { error: "Invalid decision." };
   if (decision === "modification_demandee" && !comment) return { error: "Please describe the changes you need." };
   const proof = await prisma.proof.findUnique({ where: { token }, include: { personalization: true, personalizations: true } });
   if (!proof?.isCurrent || proof.deletedAt || !proof.personalizations.length || proof.personalizations.some((p) => !p.isActive || p.shop !== proof.personalization.shop || p.draftOrderId !== proof.personalization.draftOrderId) || !proof.personalization.isActive || !proof.envoyeLe) return { error: "This version is no longer available for approval. Please use the latest email from our team." };
+  if (decision === "modification_demandee" && fd.get("changeTarget") && fd.get("changeTarget") !== "all") {
+    const targets = artworkSummary(proof).length ? artworkSummary(proof) : artworkMarkings(proof, [proof.personalization]);
+    const index = Number(fd.get("changeTarget"));
+    if (!Number.isInteger(index) || !targets[index]) return { error: "Please select a marking from this artwork." };
+    comment = `${personalizationLabel(targets[index], { english: true, product: false })} : ${comment}`;
+  }
+  if (decision === "modification_demandee" && fd.has("pointX")) {
+    const x = Number(fd.get("pointX")); const y = Number(fd.get("pointY"));
+    if (![x, y].every((v) => Number.isInteger(v) && v >= 0 && v <= 100)) return { error: "Please place a point inside the artwork." };
+    comment = `Point 1 (${x}% from left, ${y}% from top): ${comment}`;
+  }
   const dossier = await prisma.artworkCase.findUnique({ where: { shop_draftOrderId: { shop: proof.personalization.shop, draftOrderId: proof.personalization.draftOrderId } } });
   const item = await prisma.artworkItem.findUnique({ where: { shop_draftOrderId_lineItemId: { shop: proof.personalization.shop, draftOrderId: proof.personalization.draftOrderId, lineItemId: proof.personalization.lineItemId } } });
   if (!dossier || dossier.archivedAt || !item?.isActive || item.requirement !== "required") return { error: "This design is no longer awaiting approval." };
@@ -52,268 +65,12 @@ export const action = async ({ request }) => {
   return { success: true, token, status: decision };
 };
 
-// Page-scoped CSS (this route isn't inside the Shopify admin, so no
-// Polaris components are available here — a real stylesheet gives us
-// hover states, focus rings and responsive rules inline styles can't).
-const PAGE_STYLES = `
-  .pr-page {
-    min-height: 100vh;
-    background: #f4f5f7;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    color: #1a2233;
-  }
-  .pr-container {
-    max-width: 860px;
-    margin: 0 auto;
-    padding: 40px 20px 64px;
-  }
-  .pr-eyebrow {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: #64748b;
-    margin: 0 0 6px;
-  }
-  .pr-title {
-    font-size: 24px;
-    font-weight: 700;
-    margin: 0 0 28px;
-    color: #0b2545;
-  }
-  .pr-card {
-    background: #ffffff;
-    border: 1px solid #e4e7ec;
-    border-radius: 16px;
-    padding: 24px;
-    margin-bottom: 20px;
-    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-  }
-  .pr-card-title {
-    font-size: 17px;
-    font-weight: 600;
-    margin: 0 0 14px;
-    color: #0b2545;
-  }
-  .pr-details {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-    gap: 10px 18px;
-    background: #f8f9fb;
-    border: 1px solid #eef0f3;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 16px;
-  }
-  .pr-logo {
-    grid-column: 1 / -1;
-    height: 40px;
-    width: fit-content;
-    object-fit: contain;
-    background: #fff;
-    border: 1px solid #e4e7ec;
-    border-radius: 6px;
-    padding: 4px 8px;
-  }
-  .pr-details-label {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: #94a3b8;
-    margin: 0 0 2px;
-  }
-  .pr-details-value {
-    font-size: 14px;
-    color: #1a2233;
-    margin: 0;
-  }
-  .pr-image {
-    width: 100%;
-    display: block;
-    border-radius: 10px;
-    border: 1px solid #e4e7ec;
-    margin-bottom: 16px;
-    background: #f8f9fb;
-    object-fit: contain;
-    max-height: 85vh;
-  }
-  .pr-pdf-frame {
-    width: 100%;
-    height: 85vh;
-    min-height: 600px;
-    display: block;
-    border-radius: 10px;
-    border: 1px solid #e4e7ec;
-    margin-bottom: 16px;
-    background: #f8f9fb;
-  }
-  .pr-pdf-fallback {
-    display: inline-block;
-    font-size: 13px;
-    margin: -8px 0 16px;
-    color: #0b2545;
-    font-weight: 600;
-    text-decoration: underline;
-  }
-  .pr-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    font-weight: 600;
-    padding: 6px 12px;
-    border-radius: 999px;
-    margin-bottom: 14px;
-  }
-  .pr-status--approved {
-    background: #dcfce7;
-    color: #15803d;
-  }
-  .pr-status--changes {
-    background: #fee2e2;
-    color: #b91c1c;
-  }
-  .pr-comment {
-    font-size: 13px;
-    color: #64748b;
-    font-style: italic;
-    margin: -4px 0 14px;
-  }
-  .pr-actions {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .pr-btn {
-    appearance: none;
-    border: none;
-    cursor: pointer;
-    font-size: 14px;
-    font-weight: 600;
-    padding: 10px 18px;
-    border-radius: 8px;
-    transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
-  }
-  .pr-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
-  .pr-btn--primary {
-    background: #0b2545;
-    color: #ffffff;
-  }
-  .pr-btn--primary:hover:not(:disabled) {
-    background: #081b33;
-  }
-  .pr-btn--secondary {
-    background: #ffffff;
-    color: #0b2545;
-    border: 1px solid #cbd5e1;
-  }
-  .pr-btn--secondary:hover:not(:disabled) {
-    background: #f8f9fb;
-    border-color: #0b2545;
-  }
-  .pr-btn--ghost {
-    background: transparent;
-    color: #64748b;
-  }
-  .pr-btn--ghost:hover:not(:disabled) {
-    background: #f1f2f4;
-  }
-  .pr-textarea {
-    width: 100%;
-    box-sizing: border-box;
-    font-family: inherit;
-    font-size: 14px;
-    padding: 10px 12px;
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    resize: vertical;
-    margin-bottom: 10px;
-  }
-  .pr-textarea:focus {
-    outline: none;
-    border-color: #0b2545;
-    box-shadow: 0 0 0 3px rgba(11, 37, 69, 0.12);
-  }
-  .pr-error {
-    color: #b91c1c;
-    font-size: 13px;
-    margin: 10px 0 0;
-  }
-  .pr-empty {
-    background: #ffffff;
-    border: 1px solid #e4e7ec;
-    border-radius: 16px;
-    padding: 32px 24px;
-    text-align: center;
-    color: #64748b;
-  }
-  .pr-thankyou {
-    max-width: 480px;
-    margin: 60px auto 0;
-    text-align: center;
-    padding: 0 20px;
-  }
-  .pr-thankyou-icon {
-    width: 56px;
-    height: 56px;
-    line-height: 56px;
-    border-radius: 999px;
-    background: #dcfce7;
-    color: #15803d;
-    font-size: 26px;
-    margin: 0 auto 16px;
-  }
-  .pr-thankyou h1 {
-    font-size: 22px;
-    color: #0b2545;
-    margin: 0 0 10px;
-  }
-  .pr-thankyou p {
-    color: #475569;
-    font-size: 15px;
-    line-height: 1.5;
-    margin: 0;
-  }
-`;
-
-// Small info box listing the personalization details for this proof —
-// only the fields that were actually filled in are shown.
-function PersonalizationDetails({ personalization }) {
-  const rows = [
-    ["Technique", ({ Broderie: "Embroidery", Impression: "Print", Gravure: "Engraving", "Sérigraphie": "Screen printing" })[personalization.type] || personalization.type],
-    ["Quantity", personalization.quantity],
-    ["Marking dimensions", personalization.dimensions],
-    ["Previous size information", personalization.size],
-    ["Marking colour", personalization.color],
-    ["Placement", ({ "Poitrine gauche": "Left chest", "Poitrine droite": "Right chest", Manche: "Sleeve", Dos: "Back", Autre: "Other" })[personalization.location] || personalization.location],
-    ["Custom text", personalization.customText],
-  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
-
-  if (rows.length === 0 && !personalization.logoUrl) return null;
-
-  return (
-    <div className="pr-details">
-      {personalization.logoUrl && (
-        <img className="pr-logo" src={personalization.logoUrl} alt="Logo" />
-      )}
-      {rows.map(([label, value]) => (
-        <div key={label}>
-          <p className="pr-details-label">{label}</p>
-          <p className="pr-details-value">{value}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ProofCard({ proof }) {
   const fetcher = useFetcher();
   const [isRequestingChange, setIsRequestingChange] = useState(false);
   const [comment, setComment] = useState("");
+  const [target, setTarget] = useState("all");
+  const [annotating, setAnnotating] = useState(false); const [annotation, setAnnotation] = useState(null);
 
   // After each decision, React Router automatically refreshes the page's
   // data in the background (no visible navigation): the status shown
@@ -334,39 +91,14 @@ function ProofCard({ proof }) {
     formData.set("decision", decision);
     if (decision === "modification_demandee") {
       formData.set("commentaireClient", comment);
+      formData.set("changeTarget", target);
+      if (annotation) { formData.set("pointX", String(annotation.x)); formData.set("pointY", String(annotation.y)); }
     }
     fetcher.submit(formData, { method: "post" });
   };
 
   return (
-    <div className="pr-card">
-      <h3 className="pr-card-title">{artworkLabel({ ...proof, personalizations: proof.markings }, { english: true })}</h3>
-
-      {proof.sizes?.articles.length > 0 && <div className="pr-details"><strong>Sizes and quantities</strong>{proof.sizes.articles.map((i) => <p key={i.lineItemId}>{[i.colorLabel, i.sizeLabel || i.variantTitle].filter(Boolean).join(" / ")} : {i.quantity}</p>)}<strong>Total articles: {proof.sizes.total}</strong><a href={`/proof-review/summary?token=${encodeURIComponent(proof.token)}`} target="_blank" rel="noreferrer">Download size summary (PDF)</a></div>}
-      <p className="pr-comment">Design version {proof.version}{!proof.isCurrent ? " · Replaced by a newer version. Please use the latest email." : ""}</p>
-      <p className="pr-comment">This artwork covers the markings below. Your approval or change request applies to this complete version.</p>
-      {(proof.markings || [proof.personalization]).map((p, i) => <section key={p.personalizationId || p.id || i}><h4>{personalizationLabel(p, { english: true, product: false })}</h4><PersonalizationDetails personalization={p}/></section>)}
-
-      {proof.mimeType === "application/pdf" ? (
-        <>
-          <iframe
-            className="pr-pdf-frame"
-            src={proof.imageUrl}
-            title={`Proposed design — ${personalizationLabel(proof.personalization, { english: true })}`}
-          />
-          <a
-            className="pr-pdf-fallback"
-            href={proof.imageUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open the PDF in a new tab
-          </a>
-        </>
-      ) : (
-        <a href={proof.imageUrl} target="_blank" rel="noreferrer" aria-label="Open full-size design"><img className="pr-image" src={proof.imageUrl} alt="Proposed design" /></a>
-      )}
-
+    <ProofReviewContent proof={proof} summaryUrl={`/proof-review/summary?token=${encodeURIComponent(proof.token)}`} annotating={annotating} annotation={annotation || commentPoint(proof.commentaireClient)} onAnnotate={(point) => { setAnnotation(point); setAnnotating(false); }}>
       {proof.status === "approuve" && (
         <div className="pr-status pr-status--approved">✓ Approved</div>
       )}
@@ -380,7 +112,7 @@ function ProofCard({ proof }) {
       )}
 
       {!alreadyAnswered && !isRequestingChange && (
-        <div className="pr-actions">
+        <div className="pr-actions pr-decision">
           <button
             type="button"
             className="pr-btn pr-btn--primary"
@@ -401,8 +133,16 @@ function ProofCard({ proof }) {
       )}
 
       {!alreadyAnswered && isRequestingChange && (
-        <div>
-          <textarea
+        <div className="pr-change-form">
+          {proof.mimeType !== "application/pdf" && <><button type="button" className="pr-btn pr-btn--secondary" onClick={() => setAnnotating(!annotating)}>{annotating ? "Cancel point placement" : "Add a point on the artwork"}</button>{annotating && <p className="pr-pin-help" role="status">Click a location on the artwork above, or describe it in your comment.</p>}{annotation && <p className="pr-pin-help">Point 1: {annotation.x}% from left, {annotation.y}% from top. <button type="button" className="pr-btn pr-btn--ghost" onClick={() => setAnnotation(null)}>Remove point</button></p>}</>}
+          <label>Which marking needs a change?
+            <select className="pr-select" value={target} onChange={(event) => setTarget(event.target.value)}>
+              <option value="all">Whole artwork / other</option>
+              {(proof.markings || [proof.personalization]).map((p, index) => <option key={index} value={String(index)}>{personalizationLabel(p, { english: true, product: false })}</option>)}
+            </select>
+          </label>
+          <label htmlFor={`comment-${proof.id}`}>Describe the changes</label>
+          <textarea id={`comment-${proof.id}`} maxLength={3500}
             rows={3}
             className="pr-textarea"
             placeholder="Describe the changes and specify the marking (for example: back print or chest embroidery)..."
@@ -422,7 +162,7 @@ function ProofCard({ proof }) {
               type="button"
               className="pr-btn pr-btn--ghost"
               disabled={isSubmitting}
-              onClick={() => setIsRequestingChange(false)}
+              onClick={() => { setIsRequestingChange(false); setAnnotating(false); }}
             >
               Cancel
             </button>
@@ -430,8 +170,8 @@ function ProofCard({ proof }) {
         </div>
       )}
 
-      {fetcher.data?.error && <p className="pr-error">{fetcher.data.error}</p>}
-    </div>
+      {fetcher.data?.error && <p className="pr-error" role="alert">{fetcher.data.error}</p>}
+    </ProofReviewContent>
   );
 }
 
@@ -440,11 +180,11 @@ export default function ProofReview() {
   const actionable = proofs.filter((p) => p.isCurrent);
   const answered = actionable.filter((p) => p.status !== "en_attente").length;
   const allAnswered = actionable.length > 0 && answered === actionable.length;
-  return <div className="pr-page"><style>{PAGE_STYLES}</style><div className="pr-container">
+  return <div className="pr-page"><style>{REVIEW_STYLES}</style><div className="pr-container">
     <p className="pr-eyebrow">Marina Yacht Wear · Artwork approval</p>
     <h1 className="pr-title">{dossier?.yachtName || "Review your designs"}</h1>
     {dossier && <p>{dossier.name}{dossier.customerName ? ` · ${dossier.customerName}` : ""}</p>}
-    {actionable.length > 0 && <p aria-live="polite">{answered} of {actionable.length} designs reviewed</p>}
+    {actionable.length > 0 && <><p aria-live="polite">{answered} of {actionable.length} designs reviewed</p><div className="pr-progress" role="progressbar" aria-label="Designs reviewed" aria-valuenow={answered} aria-valuemin={0} aria-valuemax={actionable.length}><span style={{ width: `${answered / actionable.length * 100}%` }}/></div></>}
     {allAnswered && <div className="pr-empty"><h2>Thank you!</h2><p>Your responses have been recorded. Your decisions and designs remain available below.</p></div>}
     {!proofs.length && <div className="pr-empty">This link is unavailable. Please contact your Marina Yacht Wear representative for the latest designs.</div>}
     {proofs.map((proof) => <ProofCard key={proof.id} proof={proof}/>)}

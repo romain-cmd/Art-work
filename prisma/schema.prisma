@@ -137,6 +137,7 @@ model ArtworkCase {
   email           String?
   customerName    String?
   yachtName       String?
+  responsibleName String?
   shopifyStatus   String @default("OPEN")
   orderId         String?
   orderName       String?
@@ -148,6 +149,15 @@ model ArtworkCase {
   events          ArtworkEvent[]
   @@unique([shop, draftOrderId])
   @@index([shop, archivedAt, shopifyUpdatedAt])
+}
+
+model ArtworkTemplate {
+  id           String @id @default(cuid())
+  shop         String
+  name         String
+  specs        Json
+  createdAt    DateTime @default(now())
+  @@index([shop, name])
 }
 
 model ArtworkItem {

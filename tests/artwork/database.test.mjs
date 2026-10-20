@@ -5,6 +5,21 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createArtwork } from "../../app/lib/shared-artwork.server.js";
 
+test("workspace migration persists shop templates and optional dossier owners without affecting proofs", { skip: process.env.DELIVERY_TEST_DATABASE !== "1" }, async () => {
+  const { PrismaClient } = await import("@prisma/client"); const db = new PrismaClient(); const shop = `workspace-test-${randomUUID()}`;
+  try {
+    const dossier = await db.artworkCase.create({ data: { shop, draftOrderId: "draft", name: "D1" } });
+    assert.equal(dossier.responsibleName, null);
+    await db.artworkCase.update({ where: { id: dossier.id }, data: { responsibleName: "Romain" } });
+    const template = await db.artworkTemplate.create({ data: { shop, name: "Broderie yacht", specs: { type: "Broderie", dimensions: "80 × 35 mm", logoUrl: "https://example.test/logo.pdf" } } });
+    assert.equal((await db.artworkCase.findUnique({ where: { id: dossier.id } })).responsibleName, "Romain");
+    assert.equal((await db.artworkTemplate.findFirst({ where: { shop } })).specs.logoUrl, "https://example.test/logo.pdf");
+    assert.equal(await db.artworkTemplate.count({ where: { shop: `${shop}-other` } }), 0);
+    await db.artworkTemplate.delete({ where: { id: template.id } });
+    assert.equal(await db.artworkCase.count({ where: { shop } }), 1);
+  } finally { await db.artworkTemplate.deleteMany({ where: { shop } }); await db.artworkCase.deleteMany({ where: { shop } }); await db.$disconnect(); }
+});
+
 test("shared artwork migration preserves old tokens, responses and ownership", { skip: process.env.DELIVERY_TEST_DATABASE !== "1" }, async () => {
   const { PrismaClient } = await import("@prisma/client");
   const db = new PrismaClient();

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fixtureServer } from "./fixture.mjs";
+import { builderFingerprint } from "../../app/lib/artwork-workspace.js";
 
 const env = await fixtureServer();
 test.after(() => env.server.close());
@@ -10,6 +11,72 @@ const request = (data) => {
   return new Request("http://localhost/app/personnalisation", { method: "POST", body });
 };
 const save = (extra = {}) => env.routes.artwork.action({ request: request({ intent: "save-personalization", caseId: "case", lineItemId: "line", reuseId: "marking-chest001", duplicateSourceId: "marking-chest001", type: "Impression", quantity: "12", dimensions: "200 mm", color: "White", location: "Dos", customText: "Example Yacht", ...extra }) });
+
+function builderData(extra = {}) {
+  const { state } = env.fixture;
+  const selectedItems = state.artworkItem.map((i) => i.id);
+  return { intent: "prepare-artwork", caseId: "case", selectedItems: JSON.stringify(selectedItems),
+    preparationFingerprint: builderFingerprint({ items: state.artworkItem, personalizations: state.personalization.map((p) => ({ ...p, proofs: state.proof.filter((pr) => (pr._markingIds || [pr.personalizationId]).includes(p.id)) })) }, selectedItems),
+    existingIds: "[]", markings: JSON.stringify([{ key: "first", type: "Broderie", location: "Poitrine gauche", dimensions: "80 × 35 mm", quantities: Object.fromEntries(state.artworkItem.map((i) => [i.id, i.quantity])) }]),
+    proofImages: new File(["fixture"], "common.png", { type: "image/png" }), ...extra };
+}
+function freshBuilder() {
+  env.reset(); const { state } = env.fixture;
+  state.personalization = []; state.proof = []; state.kanbanCard = [];
+  state.artworkItem.push({ ...state.artworkItem[0], id: "large", lineItemId: "line-L", variantId: "variant-L", variantTitle: "Navy / L", sizeLabel: "L", quantity: 30, requirement: "pending" });
+}
+
+test("guided preparation saves two markings across sizes atomically with separate garment and marking totals", async () => {
+  freshBuilder(); const data = builderData();
+  const rows = JSON.parse(data.markings); rows.push({ key: "second", type: "Impression", location: "Dos", quantities: { article: 12, large: 15 } }); data.markings = JSON.stringify(rows);
+  assert.equal((await env.routes.artwork.action({ request: request(data) })).success, true);
+  const { state } = env.fixture;
+  assert.equal(state.proof.length, 1); assert.equal(state.personalization.length, 4); assert.equal(state.kanbanCard.length, 4);
+  assert.ok(state.artworkItem.every((i) => i.requirement === "required"));
+  assert.equal(state.proof[0].snapshot.articles.reduce((n, i) => n + i.quantity, 0), 50);
+  assert.deepEqual(state.personalization.filter((p) => p.type === "Impression").map((p) => p.quantity), [12, 15]);
+  assert.equal(env.fixture.emails.length, 0, "preparing is separate from sending");
+});
+
+test("guided preparation rejects stale Shopify data, foreign products, invalid quantities and unconfirmed colours", async () => {
+  for (const scenario of ["stale", "product", "quantity", "colour"]) {
+    freshBuilder();
+    if (scenario === "product") env.fixture.state.artworkItem[1].productId = "foreign";
+    if (scenario === "colour") env.fixture.state.artworkItem[1].colorLabel = "White";
+    const data = builderData();
+    if (scenario === "stale") data.preparationFingerprint = "old";
+    if (scenario === "quantity") { const rows = JSON.parse(data.markings); rows[0].quantities.large = 31; data.markings = JSON.stringify(rows); }
+    assert.equal((await env.routes.artwork.action({ request: request(data) })).success, false, scenario);
+    assert.equal(env.fixture.state.proof.length, 0); assert.equal(env.fixture.state.personalization.length, 0);
+  }
+  freshBuilder(); env.fixture.state.artworkItem[1].colorLabel = "White";
+  assert.equal((await env.routes.artwork.action({ request: request(builderData({ confirmColors: "yes" })) })).success, true);
+});
+
+test("templates are shop scoped and retain only specifications; dossier assignment is editable", async () => {
+  env.reset(); env.fixture.state.personalization[0].logoUrl = "https://example.test/logo.pdf";
+  assert.equal((await env.routes.artwork.action({ request: request({ intent: "save-template", caseId: "case", personalizationId: "marking-chest001", templateName: "Broderie yacht" }) })).success, true);
+  const template = env.fixture.state.artworkTemplate[0];
+  assert.equal(template.specs.logoUrl, "https://example.test/logo.pdf"); assert.equal(template.specs.quantity, undefined); assert.equal(template.specs.proofs, undefined);
+  assert.equal((await env.routes.artwork.action({ request: request({ intent: "assign-case", caseId: "case", responsibleName: "Romain" }) })).success, true);
+  assert.equal(env.fixture.state.artworkCase[0].responsibleName, "Romain");
+  env.fixture.state.personalization = []; env.fixture.state.proof = []; env.fixture.state.kanbanCard = [];
+  const data = builderData(); const rows = JSON.parse(data.markings); rows[0].templateId = template.id; data.markings = JSON.stringify(rows);
+  assert.equal((await env.routes.artwork.action({ request: request(data) })).success, true);
+  assert.equal(env.fixture.state.personalization[0].logoUrl, "https://example.test/logo.pdf");
+  template.shop = "other-shop";
+  assert.equal((await env.routes.artwork.action({ request: request({ intent: "delete-template", caseId: "case", templateId: template.id }) })).success, false);
+});
+
+test("client corrections identify a marking and optionally a bounded point in the artwork", async () => {
+  env.reset(); const proof = env.fixture.state.proof[0]; proof.status = "en_attente";
+  const reply = { token: proof.token, decision: "modification_demandee", commentaireClient: "Make this smaller", changeTarget: "0", pointX: "25", pointY: "40" };
+  assert.ok((await env.routes.review.action({ request: request({ ...reply, changeTarget: "999" }) })).error);
+  assert.ok((await env.routes.review.action({ request: request({ ...reply, pointX: "101" }) })).error);
+  assert.equal(proof.status, "en_attente");
+  assert.equal((await env.routes.review.action({ request: request(reply) })).success, true);
+  assert.match(proof.commentaireClient, /Point 1 \(25% from left, 40% from top\): Embroidery · Left chest/);
+});
 
 test("actual route actions: duplicate, validate, produce, revise independently", async () => {
   env.reset();
