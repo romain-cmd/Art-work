@@ -73,7 +73,7 @@ export function createFixture() {
 
 export async function fixtureServer() {
   globalThis.__artworkFixture = createFixture();
-  const server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ["resend", "@shopify/app-bridge-react"] }, appType: "custom", esbuild: { jsx: "automatic" }, plugins: [{
+  const server = await createServer({ configFile: false, cacheDir: "node_modules/.vite-artwork-fixture", resolve: { dedupe: ["react", "react-dom", "react-router"] }, optimizeDeps: { include: ["react", "react-dom/client", "react-router", "react/jsx-runtime", "react/jsx-dev-runtime"] }, server: { middlewareMode: true, hmr: false, ws: false }, ssr: { noExternal: ["resend", "@shopify/app-bridge-react"] }, appType: "custom", esbuild: { jsx: "automatic" }, plugins: [{
     name: "isolated-artwork-fixture",
     enforce: "pre",
     resolveId(id) {
