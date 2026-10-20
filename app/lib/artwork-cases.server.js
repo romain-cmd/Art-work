@@ -1,3 +1,5 @@
+import { reopenProduction } from "./artwork-production.server";
+import { personalizationLabel } from "./personalization";
 import prisma from "../db.server";
 import { ARTWORK_TAG, snapshotPersonalization } from "./artwork-status";
 import { fetchDraftLineItems, syncDraftPersonalizations } from "./draft-order-sync.server";
@@ -65,6 +67,7 @@ export async function indexCases(admin, shop, force = false) {
   await prisma.shopSettings.upsert({ where: { shop }, create: { shop, artworkIndexedAt: new Date() }, update: { artworkIndexedAt: new Date() } });
 }
 export async function invalidateProofs(db, personalization, caseId, reason) {
+  await reopenProduction(db, personalization, caseId);
   const oldProofs = await db.proof.findMany({ where: { personalizationId: personalization.id, isCurrent: true } });
   for (const old of oldProofs) {
     const retired = await db.proof.updateMany({ where: { id: old.id, isCurrent: true }, data: { isCurrent: false } });
@@ -99,7 +102,7 @@ export async function reconcileCase(admin, shop, draft) {
     for (const p of ps) {
       const prev = before.find((old) => old.id === p.id);
       if (prev && (prev.quantity !== p.quantity || prev.productTitle !== p.productTitle)) {
-        await invalidateProofs(tx, p, dossier.id, `Article Shopify modifié : ${p.productTitle}.`);
+        await invalidateProofs(tx, p, dossier.id, `Article Shopify modifié : ${personalizationLabel(p)}.`);
       }
     }
   });

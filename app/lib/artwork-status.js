@@ -35,7 +35,7 @@ export function summarizeCase(items, personalizations) {
     waiting: proofs.filter((p) => p.status === "en_attente" && p.envoyeLe).length };
 }
 export function snapshotPersonalization(p) {
-  return Object.fromEntries(["productTitle", "type", "quantity", "size", "dimensions", "color", "location", "customText", "logoUrl"].map((k) => [k, p[k] ?? null]));
+  return { personalizationId: p.id, ...Object.fromEntries(["productTitle", "type", "quantity", "size", "dimensions", "color", "location", "customText", "logoUrl"].map((k) => [k, p[k] ?? null])) };
 }
 export function fileExtension(mime, url = "") {
   const types = { "application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/svg+xml": ".svg", "application/postscript": ".eps", "application/illustrator": ".ai" };

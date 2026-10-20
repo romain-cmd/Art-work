@@ -1,3 +1,4 @@
+import { personalizationLabel } from "../lib/personalization";
 /* eslint-disable react/prop-types -- no PropTypes package in this project */
 import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -17,7 +18,7 @@ export const loader = async ({ request }) => {
   if (!dossier || dossier.archivedAt) return { proofs: [], dossier: null };
   const required = await prisma.artworkItem.findMany({ where: { shop: first.shop, draftOrderId: first.draftOrderId, isActive: true, requirement: "required" } });
   const proofs = candidates.filter((p) => p.personalization.shop === first.shop && p.personalization.draftOrderId === first.draftOrderId && required.some((i) => i.lineItemId === p.personalization.lineItemId) && (p.envoyeLe || p.status !== "en_attente"));
-  return { proofs: proofs.map((p) => ({ ...p, personalization: p.snapshot || p.personalization })), dossier: { name: dossier.name, yachtName: dossier.yachtName, customerName: dossier.customerName } };
+  return { proofs: proofs.map((p) => ({ ...p, personalization: { ...(p.snapshot || p.personalization), personalizationId: p.personalizationId } })), dossier: { name: dossier.name, yachtName: dossier.yachtName, customerName: dossier.customerName } };
 };
 
 export const action = async ({ request }) => {
@@ -31,7 +32,7 @@ export const action = async ({ request }) => {
   if (!dossier || dossier.archivedAt || !item?.isActive || item.requirement !== "required") return { error: "This design is no longer awaiting approval." };
   const changed = await prisma.$transaction(async (tx) => {
     const update = await tx.proof.updateMany({ where: { id: proof.id, isCurrent: true, status: "en_attente" }, data: { status: decision, commentaireClient: decision === "modification_demandee" ? comment : null, reponduLe: new Date(), approvedVia: "Lien client" } });
-    if (update.count) await event(dossier.id, `BAT V${proof.version} ${decision === "approuve" ? "validé" : "à corriger"} : ${proof.personalization.productTitle}.${comment ? ` Commentaire : ${comment}` : ""}`, "Client", tx);
+    if (update.count) await event(dossier.id, `BAT V${proof.version} ${decision === "approuve" ? "validé" : "à corriger"} : ${personalizationLabel(proof.personalization)}.${comment ? ` Commentaire : ${comment}` : ""}`, "Client", tx);
     return update.count;
   });
   if (!changed) return { error: "A response has already been recorded for this design. Refresh the page to see it." };
@@ -40,7 +41,7 @@ export const action = async ({ request }) => {
     if (settings?.notificationEmail) {
       // eslint-disable-next-line no-undef
       const adminUrl = `${process.env.SHOPIFY_APP_URL}/app/personnalisation?case=${dossier.id}`;
-      await sendInternalNotificationEmail({ to: settings.notificationEmail, productTitle: proof.personalization.productTitle, decision, comment: decision === "modification_demandee" ? comment : null, adminUrl });
+      await sendInternalNotificationEmail({ to: settings.notificationEmail, productTitle: personalizationLabel(proof.personalization), decision, comment: decision === "modification_demandee" ? comment : null, adminUrl });
     }
   } catch (error) { console.error("Failed to send internal notification email", error); }
   return { success: true, token, status: decision };
@@ -334,7 +335,7 @@ function ProofCard({ proof }) {
 
   return (
     <div className="pr-card">
-      <h3 className="pr-card-title">{proof.personalization.productTitle}</h3>
+      <h3 className="pr-card-title">{personalizationLabel(proof.personalization, { english: true })}</h3>
 
       <p className="pr-comment">Design version {proof.version}{!proof.isCurrent ? " · Replaced by a newer version. Please use the latest email." : ""}</p>
       <PersonalizationDetails personalization={proof.personalization} />
@@ -344,7 +345,7 @@ function ProofCard({ proof }) {
           <iframe
             className="pr-pdf-frame"
             src={proof.imageUrl}
-            title={`Proposed design — ${proof.personalization.productTitle}`}
+            title={`Proposed design — ${personalizationLabel(proof.personalization, { english: true })}`}
           />
           <a
             className="pr-pdf-fallback"
