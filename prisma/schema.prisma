@@ -52,7 +52,8 @@ model Personalization {
   logoFileName    String?
   dimensions      String?
   createdAt       DateTime @default(now())
-  proofs          Proof[]
+  proofs          Proof[] @relation("ProofMarkings")
+  ownedProofs     Proof[] @relation("ProofOwner")
 }
 
 // Statuts possibles pour le champ "status" (pas d'enum natif : SQLite ne le supporte pas) :
@@ -60,7 +61,9 @@ model Personalization {
 model Proof {
   id                String    @id @default(cuid())
   personalizationId String
-  personalization   Personalization @relation(fields: [personalizationId], references: [id])
+  personalization   Personalization @relation("ProofOwner", fields: [personalizationId], references: [id])
+  personalizations  Personalization[] @relation("ProofMarkings")
+  deletedAt         DateTime?
   imageUrl          String
   mimeType          String?
   fileName          String?
@@ -155,6 +158,9 @@ model ArtworkItem {
   variantId    String?
   title        String
   variantTitle String?
+  productId    String?
+  sizeLabel    String?
+  colorLabel   String?
   sku          String?
   quantity     Int
   requirement  String @default("pending")

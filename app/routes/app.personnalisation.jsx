@@ -8,10 +8,13 @@ import { uploadFileToShopify } from "../lib/shopify-files.server";
 import { sendProofValidationEmail } from "../lib/send-proof-email.server";
 import { DEFAULT_CLIENT_EMAIL_MESSAGE, DEFAULT_CLIENT_EMAIL_SUBJECT } from "../lib/email-defaults";
 import { applyPlaceholders } from "../lib/email-template";
-import { ARTWORK_TAG, CASE_STATUSES, acceptsBat, currentProofs, snapshotPersonalization, summarizeCase } from "../lib/artwork-status";
+import { ARTWORK_TAG, CASE_STATUSES, acceptsBat, currentProofs, uniqueProofs, artworkMarkings, artworkLabel, summarizeCase } from "../lib/artwork-status";
 import { ensureProductionCards, event, indexCases, invalidateProofs, metadata, readDossier, reconcileCase, searchDrafts, setArtworkTag, upsertCase } from "../lib/artwork-cases.server";
 import { copyPersonalization, personalizationLabel } from "../lib/personalization";
-import { noteAddedMarking, reopenProduction } from "../lib/artwork-production.server";
+import { noteAddedMarking } from "../lib/artwork-production.server";
+import { groupedMarkings } from "../lib/artwork-groups.server";
+import { sizeSummary, artworkSummary } from "../lib/artwork-groups";
+import { createArtwork, reopenArtworkProduction, invalidateArtworks } from "../lib/shared-artwork.server";
 import { WORKSPACE_STYLES } from "../lib/workspace-styles";
 
 export const loader = async ({ request }) => {
@@ -107,12 +110,19 @@ export const action = async ({ request }) => {
       const item = await prisma.artworkItem.findFirst({ where: { id: str(fd, "itemId"), shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } });
       const requirement = str(fd, "requirement");
       if (!item || !["pending", "required", "none"].includes(requirement)) throw new Error("Article ou choix invalide.");
-      await prisma.artworkItem.update({ where: { id: item.id }, data: { requirement } });
-      await event(dossier.id, `${item.title} : ${requirement === "required" ? "BAT requis" : requirement === "none" ? "sans BAT requis" : "à qualifier"}.`);
+      await prisma.$transaction(async (tx) => {
+        await tx.artworkItem.update({ where: { id: item.id }, data: { requirement } });
+        if (item.requirement === "required" && requirement !== "required") {
+          const excluded = await tx.personalization.findMany({ where: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId, isActive: true } });
+          await invalidateArtworks(tx, excluded, dossier.id, "Périmètre du BAT modifié.");
+        }
+        await event(dossier.id, `${item.title} : ${requirement === "required" ? "BAT requis" : requirement === "none" ? "sans BAT requis" : "à qualifier"}.`, "Équipe", tx);
+      });
       await ensureProductionCards(session.shop, dossier.draftOrderId);
       return { success: true, message: "Article mis à jour" };
     }
     if (intent === "save-personalization") {
+      if (fd.getAll("proofImages").some((file) => file && file.size > 0)) throw new Error("Importe l’artwork dans la section Artworks de cet article, puis sélectionne ses marquages.");
       const specs = specifications(fd);
       const existing = str(fd, "personalizationId") ? await checkedPersonalization(fd, session.shop, dossier) : null;
       const item = await prisma.artworkItem.findFirst({ where: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: existing?.lineItemId || str(fd, "lineItemId"), isActive: true } });
@@ -122,7 +132,7 @@ export const action = async ({ request }) => {
       const source = reuseId ? await prisma.personalization.findFirst({ where: { id: reuseId, shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } }) : null;
       if (reuseId && !source) throw new Error("La personnalisation source n’est plus disponible. Actualise le dossier.");
       if (str(fd, "duplicateSourceId") && (existing || source?.id !== str(fd, "duplicateSourceId") || source.lineItemId !== item.lineItemId)) throw new Error("La duplication doit rester sur le même article.");
-      const uploads = await proofFiles(admin, fd); const logo = await logoFile(admin, fd);
+      const logo = await logoFile(admin, fd);
       if (!logo.logoUrl && source) Object.assign(logo, { logoUrl: source.logoUrl, logoMimeType: source.logoMimeType, logoFileName: source.logoFileName });
       await prisma.$transaction(async (tx) => {
         const p = existing ? await tx.personalization.update({ where: { id: existing.id }, data: { ...specs, ...logo } }) : await tx.personalization.create({ data: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId, variantId: item.variantId, sourceQuantity: item.quantity, productTitle: item.title, size: source?.size || null, ...specs, ...logo } });
@@ -130,13 +140,11 @@ export const action = async ({ request }) => {
         if (changedSpecs) {
           await invalidateProofs(tx, p, dossier.id, `Caractéristiques modifiées : ${personalizationLabel(p)}.`);
         }
-        if (existing && uploads.length && !changedSpecs) await reopenProduction(tx, p, dossier.id);
         if (!existing) await noteAddedMarking(tx, p, dossier.id);
-        for (const upload of uploads) await tx.proof.create({ data: { personalizationId: p.id, ...upload, snapshot: snapshotPersonalization(p) } });
-        await event(dossier.id, `${existing ? "Personnalisation modifiée" : "Personnalisation préparée"} : ${personalizationLabel(p)}${uploads.length ? `, ${uploads.length} BAT enregistré(s)` : ""}.`, "Équipe", tx);
+        await event(dossier.id, `${existing ? "Personnalisation modifiée" : "Personnalisation préparée"} : ${personalizationLabel(p)}.`, "Équipe", tx);
       });
       await ensureProductionCards(session.shop, dossier.draftOrderId);
-      return { success: true, message: "Personnalisation et fichiers enregistrés" };
+      return { success: true, message: "Personnalisation enregistrée. Ajoute ou associe l’artwork de l’article." };
     }
     if (intent === "copy-personalization") {
       const source = await checkedPersonalization(fd, session.shop, dossier);
@@ -153,18 +161,38 @@ export const action = async ({ request }) => {
       await ensureProductionCards(session.shop, dossier.draftOrderId);
       return { success: true, message: "Paramètres copiés. Ajoute les BAT de chaque article." };
     }
-    if (intent === "add-proofs" || intent === "revise-proof") {
-      const p = await checkedPersonalization(fd, session.shop, dossier); const uploads = await proofFiles(admin, fd);
-      if (!uploads.length) throw new Error("Choisis un BAT image ou PDF.");
-      const old = intent === "revise-proof" ? p.proofs.find((proof) => proof.id === str(fd, "proofId") && proof.isCurrent) : null;
-      if (intent === "revise-proof" && (!old || uploads.length !== 1)) throw new Error("Choisis un seul fichier pour remplacer ce BAT.");
+    if (["add-article-proofs", "revise-proof", "link-proof", "delete-proof"].includes(intent)) {
+      const item = await prisma.artworkItem.findFirst({ where: { id: str(fd, "itemId"), shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true, requirement: "required" } });
+      if (!item) throw new Error("Article actif avec BAT requis introuvable.");
+      const available = await prisma.personalization.findMany({ where: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId, isActive: true } });
+      const old = intent !== "add-article-proofs" ? await prisma.proof.findFirst({ where: { id: str(fd, "proofId"), isCurrent: true, deletedAt: null, personalizations: { some: { shop: session.shop, draftOrderId: dossier.draftOrderId, lineItemId: item.lineItemId } } }, include: { personalizations: true } }) : null;
+      if (intent !== "add-article-proofs" && !old) throw new Error("Cet artwork n’est plus actuel. Actualise le dossier.");
+      if (intent === "delete-proof") {
+        await prisma.$transaction(async (tx) => {
+          const removed = await tx.proof.updateMany({ where: { id: old.id, isCurrent: true, deletedAt: null }, data: { isCurrent: false, deletedAt: new Date() } });
+          if (!removed.count) throw new Error("Cet artwork a déjà changé.");
+          await reopenArtworkProduction(tx, old.personalizations, dossier.id);
+          await event(dossier.id, `Artwork supprimé du suivi actif : ${old.fileName || "BAT"}, V${old.version}. Ancien lien désactivé.`, "Équipe", tx);
+        });
+        return { success: true, message: "Artwork supprimé. Les marquages sans autre BAT restent à préparer." };
+      }
+      const ids = [...new Set(fd.getAll("markingId").map(String))];
+      const markings = available.filter((p) => ids.includes(p.id));
+      if (!markings.length || markings.length !== ids.length) throw new Error("Sélectionne des marquages de cet article uniquement.");
+      const groupIds = [...new Set([item.id, ...fd.getAll("groupItemId").map(String)])];
+      const groupItems = await prisma.artworkItem.findMany({ where: { id: { in: groupIds }, shop: session.shop, draftOrderId: dossier.draftOrderId, isActive: true } });
+      if (groupItems.length !== groupIds.length || groupItems.some((i) => i.requirement === "none") || (groupItems.length > 1 && (!item.productId || groupItems.some((i) => i.productId !== item.productId)))) throw new Error("Choisis uniquement des tailles du même produit avec BAT requis ou à préparer.");
+      const uploads = intent === "link-proof" ? [old] : await proofFiles(admin, fd);
+      if (!uploads.length || (old && uploads.length !== 1)) throw new Error("Choisis un fichier pour cet artwork.");
       await prisma.$transaction(async (tx) => {
-        await reopenProduction(tx, p, dossier.id);
-        if (old) { const retired = await tx.proof.updateMany({ where: { id: old.id, isCurrent: true }, data: { isCurrent: false } }); if (!retired.count) throw new Error("Ce BAT a déjà été remplacé. Actualise le dossier."); }
-        for (const upload of uploads) await tx.proof.create({ data: { personalizationId: p.id, ...upload, snapshot: snapshotPersonalization(p), version: old ? old.version + 1 : 1, supersedesId: old?.id || null } });
-        await event(dossier.id, `${old ? `BAT V${old.version + 1}` : "BAT"} enregistré : ${personalizationLabel(p)}. À envoyer au client.`, "Équipe", tx);
+        const grouped = await groupedMarkings(tx, markings, groupItems, dossier.id);
+        const affected = new Map([...(old?.personalizations || []), ...grouped].map((p) => [p.id, p]));
+        await reopenArtworkProduction(tx, [...affected.values()], dossier.id);
+        for (const file of uploads) await createArtwork(tx, grouped, file, old);
+        await event(dossier.id, `Artwork ${old ? "révisé" : "importé"} : ${item.title}, ${groupItems.length} variante(s), ${grouped.length} marquage(s), ${uploads.length} fichier(s). Nouvelle validation requise.`, "Équipe", tx);
       });
-      return { success: true, message: "BAT enregistré. Il reste à l’envoyer au client." };
+      await ensureProductionCards(session.shop, dossier.draftOrderId);
+      return { success: true, message: "Artwork commun et récapitulatif enregistrés. Il reste à les faire valider." };
     }
     if (intent === "manual-approve") {
       const p = await checkedPersonalization(fd, session.shop, dossier); const proof = p.proofs.find((x) => x.id === str(fd, "proofId") && x.isCurrent && x.status === "en_attente");
@@ -184,7 +212,7 @@ export const action = async ({ request }) => {
       const summary = summarizeCase(live.items, live.personalizations);
       if (summary.pendingQualification || summary.missing) throw new Error("Qualifie tous les articles et prépare les BAT requis avant l’envoi.");
       const requiredIds = live.items.filter((i) => i.requirement === "required").map((i) => i.lineItemId);
-      const pending = live.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, personalization: p })));
+      const pending = uniqueProofs(live.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, personalization: p }))));
       if (!pending.length) throw new Error(mode === "reminder" ? "Aucun BAT à relancer." : "Aucun nouveau BAT à envoyer.");
       // Ensure the user reviewed exactly the versions that will be sent, even if Shopify changed in another tab.
       const expected = str(fd, "proofIds").split(",").filter(Boolean).sort().join(",");
@@ -192,7 +220,7 @@ export const action = async ({ request }) => {
       const settings = await prisma.shopSettings.findUnique({ where: { shop: session.shop } });
       // eslint-disable-next-line no-undef
       const reviewUrl = `${process.env.SHOPIFY_APP_URL}/proof-review?tokens=${pending.map((p) => p.token).join(",")}`;
-      await sendProofValidationEmail({ to: customerEmail, orderName: `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, items: pending.map((p) => `${personalizationLabel(p.personalization, { english: true })}, BAT V${p.version}`), reviewUrl, subjectTemplate: settings?.clientEmailSubject, messageTemplate: settings?.clientEmailMessage });
+      await sendProofValidationEmail({ to: customerEmail, orderName: `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`, artworks: pending, items: pending.map((p) => `${artworkLabel(p, { english: true })}, BAT V${p.version}`), reviewUrl, subjectTemplate: settings?.clientEmailSubject, messageTemplate: settings?.clientEmailMessage });
       await prisma.$transaction(async (tx) => {
         await tx.proof.updateMany({ where: { id: { in: pending.map((p) => p.id) }, isCurrent: true, status: "en_attente" }, data: { envoyeLe: new Date() } });
         await event(dossier.id, `${mode === "reminder" ? "Relance" : "Envoi"} à ${customerEmail} : ${pending.length} BAT.`, "Équipe", tx);
@@ -238,7 +266,7 @@ function PersonalizationEditor({ dossier, item, p = null, duplicate = null, onCl
   return <section className="aw-editor"><div className="aw-between"><h3>{p ? "Modifier la personnalisation" : duplicate ? "Dupliquer cette personnalisation" : "Préparer une personnalisation"}</h3><button className="aw-button" onClick={() => { if (window.confirm("Fermer ce formulaire ? Les changements non enregistrés seront perdus.")) onClose(); }}>Fermer</button></div>
     {!p && <p className="aw-notice">{duplicate ? "Les caractéristiques et le logo sont repris. Modifie les champs souhaités avant d’enregistrer. " : "Chaque marquage possède ses propres caractéristiques. "}Les BAT, validations et états de production ne sont pas copiés.</p>}
     {!p && !duplicate && dossier.personalizations.length > 0 && <label>Réutiliser un logo et des paramètres<select value={reuse?.id || ""} onChange={(e) => { if (document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Changer de modèle et perdre les modifications non enregistrées ?")) return; setReuse(dossier.personalizations.find((row) => row.id === e.target.value) || null); }}><option value="">Nouvelle personnalisation</option>{dossier.personalizations.map((row) => <option key={row.id} value={row.id}>{personalizationLabel(row)}</option>)}</select></label>}
-    <WorkflowForm key={reuse?.id || p?.id || "new"} intent="save-personalization" caseId={dossier.id} label="Enregistrer la personnalisation et les fichiers" onDone={onClose}>
+    <WorkflowForm key={reuse?.id || p?.id || "new"} intent="save-personalization" caseId={dossier.id} label="Enregistrer la personnalisation" onDone={onClose}>
       <input type="hidden" name="personalizationId" value={p?.id || ""}/><input type="hidden" name="lineItemId" value={item.lineItemId}/><input type="hidden" name="reuseId" value={reuse?.id || ""}/><input type="hidden" name="duplicateSourceId" value={duplicate?.id || ""}/>
       <div className="aw-grid"><label>Technique<select name="type" defaultValue={source?.type || "Broderie"}>{["Broderie", "Impression", "Gravure", "Sérigraphie"].map((t) => <option key={t}>{t}</option>)}</select></label>
         <label>Quantité personnalisée <small>Pièces concernées par ce marquage ; les mêmes pièces peuvent recevoir plusieurs marquages.</small><input type="number" name="quantity" min="1" max={item.quantity} required defaultValue={p?.quantity || (source ? copyPersonalization(source, item, { sameItem: source.lineItemId === item.lineItemId }).quantity : item.quantity)}/></label>
@@ -248,44 +276,68 @@ function PersonalizationEditor({ dossier, item, p = null, duplicate = null, onCl
         <label>Texte à personnaliser<input name="customText" defaultValue={source?.customText || ""}/></label></div>
       {p?.size && <p className="aw-muted">Ancienne information taille / dimensions : {p.size}</p>}
       <label>Logo source <small>Image, PDF, AI ou EPS, 20 Mo maximum. {source?.logoUrl ? "Logo existant conservé si aucun fichier n’est choisi." : ""}</small><input type="file" name="logo" accept="image/*,.pdf,.ai,.eps"/></label>
-      <label>Ajouter des BAT à valider <small>PNG, JPG, WebP ou PDF, 20 Mo maximum par fichier. Tu peux les ajouter plus tard.</small><input type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf" multiple/></label>
+      <p className="aw-muted">Importe ensuite l’artwork commun dans la section « Artworks de cet article ».</p>
       {p && <p className="aw-notice">Une modification des caractéristiques crée une nouvelle version des BAT. L’ancienne validation reste dans l’historique.</p>}
     </WorkflowForm>
   </section>;
 }
-function ProofView({ proof, p, caseId, readOnly }) {
+function MarkingChoices({ markings, selected = markings.map((p) => p.id) }) {
+  return <fieldset><legend>Personnalisations présentées dans cet artwork</legend>{markings.map((p) => <label className="aw-check" key={p.id}><input type="checkbox" name="markingId" value={p.id} defaultChecked={selected.includes(p.id)}/>{personalizationLabel(p, { product: false })} · {p.quantity} pièce(s)</label>)}</fieldset>;
+}
+function GroupChoices({ dossier, item, selected = [item.lineItemId] }) {
+  const peers = dossier.items.filter((i) => i.id !== item.id && i.isActive !== false && i.requirement !== "none" && item.productId && i.productId === item.productId);
+  if (!peers.length) return null;
+  return <fieldset><legend>Regrouper d’autres tailles dans ce BAT</legend><p>Les marquages seront repris sur les tailles non préparées. Les tailles déjà préparées doivent avoir les mêmes caractéristiques.</p>{peers.map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="groupItemId" value={i.id} defaultChecked={selected.includes(i.lineItemId)}/>{i.variantTitle || i.sizeLabel || "Variante"} · {i.quantity} pièce(s){i.colorLabel && i.colorLabel !== item.colorLabel ? " · autre couleur : à vérifier" : ""}</label>)}</fieldset>;
+}
+function ProofView({ proof, p, caseId, readOnly, item = null, markings = [], dossier = null }) {
   const [mode, setMode] = useState(null); const pdf = proof.mimeType === "application/pdf" || /\.pdf(?:\?|$)/i.test(proof.imageUrl);
+  const linked = artworkMarkings(proof, p ? [p] : []); const sizes = sizeSummary(proof);
   return <article className={`aw-proof ${!proof.isCurrent ? "historic" : ""}`}>
-    <div className="aw-between"><strong>BAT V{proof.version}{!proof.isCurrent ? " · historique" : ""}</strong><span className="aw-badge">{proof.status === "approuve" ? "Validé" : proof.status === "modification_demandee" ? "À corriger" : proof.envoyeLe ? "En attente du client" : "À envoyer"}</span></div>
-    <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Ouvrir le BAT PDF ↗</span> : <img src={proof.imageUrl} alt={`BAT V${proof.version} de ${personalizationLabel(p)}`} loading="lazy"/>}</a>
-    <p className="aw-muted">{proof.fileName || "Fichier BAT"}</p>{proof.snapshot && !proof.isCurrent && <details><summary>Caractéristiques de cette version</summary><p>{[proof.snapshot.productTitle, proof.snapshot.type, `${proof.snapshot.quantity} pièce(s)`, proof.snapshot.dimensions || proof.snapshot.size, proof.snapshot.color, proof.snapshot.location, proof.snapshot.customText].filter(Boolean).join(" · ")}</p></details>}{proof.commentaireClient && <blockquote>{proof.commentaireClient}</blockquote>}
+    <div className="aw-between"><strong>Artwork V{proof.version}{proof.deletedAt ? " · supprimé" : !proof.isCurrent ? " · historique" : ""}</strong><span className="aw-badge">{proof.deletedAt ? "Retiré" : proof.status === "approuve" ? "Validé" : proof.status === "modification_demandee" ? "À corriger" : proof.envoyeLe ? "En attente du client" : "À envoyer"}</span></div>
+    {sizes.articles.length > 0 && <><p>{sizes.articles.map((i) => `${i.colorLabel || ""} ${i.sizeLabel || i.variantTitle || "Variante"} : ${i.quantity}`).join(" · ")} — Total articles : {sizes.total}</p><a href={`/app/artwork-summary?proof=${proof.id}`} target="_blank" rel="noreferrer">Télécharger le récapitulatif tailles (PDF)</a></>}
+    <ul>{(artworkSummary(proof).length ? artworkSummary(proof) : linked).map((row, i) => <li key={row.personalizationId || row.id || i}>{personalizationLabel(row, { product: false })} · {row.quantity} pièce(s)</li>)}</ul>
+    {!proof.deletedAt && <a href={proof.imageUrl} target="_blank" rel="noreferrer" className="aw-proof-preview">{pdf ? <span>Ouvrir l’artwork PDF ↗</span> : <img src={proof.imageUrl} alt={`Artwork V${proof.version}`} loading="lazy"/>}</a>}
+    <p className="aw-muted">{proof.fileName || "Fichier artwork"}</p>
+    {proof.commentaireClient && <blockquote>{proof.commentaireClient}</blockquote>}
     {proof.envoyeLe && <small>Dernier envoi : {date(proof.envoyeLe)}</small>}{proof.reponduLe && <small>Réponse : {date(proof.reponduLe)}{proof.approvedVia ? ` · ${proof.approvedVia}` : ""}</small>}
-    {!readOnly && proof.isCurrent && <div className="aw-toolbar"><button className="aw-button" onClick={() => setMode(mode === "revise" ? null : "revise")}>Nouvelle version</button>{proof.status === "en_attente" && <button className="aw-button" onClick={() => setMode(mode === "approve" ? null : "approve")}>Validation reçue ailleurs</button>}</div>}
-    {mode && <WorkflowForm intent={mode === "revise" ? "revise-proof" : "manual-approve"} caseId={caseId} label={mode === "revise" ? "Enregistrer la nouvelle version" : "Enregistrer la validation"} onDone={() => setMode(null)} confirm={mode === "approve" ? "Confirmer que le client a validé cette version du BAT ?" : undefined}>
-      <input type="hidden" name="personalizationId" value={p.id}/><input type="hidden" name="proofId" value={proof.id}/>
-      {mode === "revise" ? <label>Nouveau BAT<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf"/></label> : <label>Canal de validation<select name="approvedVia" required><option value="">Choisir</option><option>Email</option><option>WhatsApp</option><option>Téléphone</option></select></label>}
-    </WorkflowForm>}
+    {!readOnly && proof.isCurrent && item && <>
+      <div className="aw-toolbar"><button className="aw-button" onClick={() => setMode(mode === "revise" ? null : "revise")}>Remplacer l’artwork</button><button className="aw-button" onClick={() => setMode(mode === "link" ? null : "link")}>Modifier les marquages associés</button>{proof.status === "en_attente" && <button className="aw-button" onClick={() => setMode(mode === "approve" ? null : "approve")}>Validation reçue ailleurs</button>}</div>
+      {mode && <WorkflowForm intent={mode === "revise" ? "revise-proof" : mode === "link" ? "link-proof" : "manual-approve"} caseId={caseId} label={mode === "approve" ? "Enregistrer la validation" : "Enregistrer la nouvelle version"} confirm={mode === "approve" ? "Confirmer que le client a validé cette version commune pour tous les marquages associés ?" : null} onDone={() => setMode(null)}>
+        <input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/><input type="hidden" name="personalizationId" value={p.id}/>
+        {mode === "approve" ? <label>Canal de validation<select name="approvedVia" required><option>Email</option><option>WhatsApp</option><option>Téléphone</option></select></label> : <><MarkingChoices markings={markings} selected={linked.map((row) => row.personalizationId || row.id)}/><GroupChoices dossier={dossier} item={item} selected={dossier.personalizations.filter((row) => row.proofs.some((pr) => pr.id === proof.id)).map((row) => row.lineItemId)}/>{mode === "revise" && <label>Nouvel artwork<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf"/></label>}<p>Cette action crée une nouvelle version à faire valider pour tous les marquages associés.</p></>}
+      </WorkflowForm>}
+      <WorkflowForm intent="delete-proof" caseId={caseId} label="Supprimer l’artwork" confirm="Retirer cet artwork pour tous ses marquages ? Le lien client sera désactivé et la production concernée sera à revoir. Une trace restera dans l’historique."><input type="hidden" name="itemId" value={item.id}/><input type="hidden" name="proofId" value={proof.id}/></WorkflowForm>
+    </>}
   </article>;
 }
 function PersonalizationView({ p, dossier, item }) {
   const [editing, setEditing] = useState(false); const [duplicating, setDuplicating] = useState(false); const [copy, setCopy] = useState(false);
-  const current = currentProofs(p); const history = p.proofs.filter((pr) => !pr.isCurrent);
   return <section className="aw-personalization"><div className="aw-between"><h3>{personalizationLabel(p, { product: false })} · {p.quantity} pièce(s)</h3>{!dossier.archivedAt && item.requirement === "required" && <div className="aw-toolbar"><button className="aw-button" onClick={() => { if (editing && document.querySelector('[data-workflow-dirty="true"]') && !window.confirm("Fermer sans enregistrer les modifications ?")) return; setEditing(!editing); }}>Modifier</button><button className="aw-button" onClick={() => setDuplicating(true)}>Dupliquer cette personnalisation</button><button className="aw-button" onClick={() => setCopy(!copy)}>Copier sur des articles</button></div>}</div>
     <p>{[p.dimensions, p.color, p.location, p.customText].filter(Boolean).join(" · ") || "Caractéristiques à compléter"}</p>
     {p.logoUrl && <a href={p.logoUrl} target="_blank" rel="noreferrer">Ouvrir le logo source ↗</a>}
     {editing && <PersonalizationEditor dossier={dossier} item={item} p={p} onClose={() => setEditing(false)}/>}
     {duplicating && <PersonalizationEditor dossier={dossier} item={item} duplicate={p} onClose={() => setDuplicating(false)}/>}
-    {copy && <WorkflowForm intent="copy-personalization" caseId={dossier.id} label="Copier les paramètres et le logo" onDone={() => setCopy(false)}><input type="hidden" name="personalizationId" value={p.id}/><p>Les BAT et les validations ne sont pas copiés.</p>{dossier.items.filter((i) => i.requirement === "required" && i.lineItemId !== p.lineItemId).map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="targetItemId" value={i.id}/>{i.title} · {i.variantTitle} · {i.quantity} pièce(s)</label>)}</WorkflowForm>}
-    {!current.length && <p className="aw-notice">Aucun BAT préparé. Ce marquage ne peut pas encore être validé.</p>}
-    <div className="aw-proof-grid">{current.map((proof) => <ProofView key={proof.id} proof={proof} p={p} caseId={dossier.id} readOnly={Boolean(dossier.archivedAt) || item.requirement !== "required"}/>)}</div>
-    {!dossier.archivedAt && item.requirement === "required" && <details><summary>Ajouter un BAT / une vue supplémentaire</summary><WorkflowForm intent="add-proofs" caseId={dossier.id} label="Enregistrer les BAT"><input type="hidden" name="personalizationId" value={p.id}/><label>BAT image ou PDF<input type="file" name="proofImages" required accept="image/png,image/jpeg,image/webp,application/pdf" multiple/></label></WorkflowForm></details>}
-    {history.length > 0 && <details><summary>Historique des versions ({history.length})</summary><div className="aw-proof-grid">{history.map((proof) => <ProofView key={proof.id} proof={proof} p={p} caseId={dossier.id} readOnly/>)}</div></details>}
+    {copy && <WorkflowForm intent="copy-personalization" caseId={dossier.id} label="Copier les paramètres et le logo" onDone={() => setCopy(false)}><input type="hidden" name="personalizationId" value={p.id}/><p>Les artworks et validations ne sont pas copiés.</p>{dossier.items.filter((i) => i.requirement === "required" && i.lineItemId !== p.lineItemId).map((i) => <label className="aw-check" key={i.id}><input type="checkbox" name="targetItemId" value={i.id}/>{i.title} · {i.variantTitle} · {i.quantity} pièce(s)</label>)}</WorkflowForm>}
+    {!currentProofs(p).length && <p className="aw-notice">Ce marquage reste à associer à un artwork dans la section ci-dessous.</p>}
+  </section>;
+}
+function ArticleArtworks({ dossier, item }) {
+  const markings = dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId);
+  const proofs = uniqueProofs(markings.flatMap((p) => p.proofs));
+  const current = proofs.filter((proof) => proof.isCurrent && !proof.deletedAt);
+  const history = proofs.filter((proof) => !proof.isCurrent || proof.deletedAt);
+  const readOnly = Boolean(dossier.archivedAt) || item.requirement !== "required";
+  const view = (proof) => <ProofView key={proof.id} proof={proof} p={markings.find((p) => p.proofs.some((pr) => pr.id === proof.id))} item={item} markings={markings} dossier={dossier} caseId={dossier.id} readOnly={readOnly || !proof.isCurrent}/>;
+  return <section className="aw-personalization"><h3>Artworks de cet article</h3><p>Un même fichier peut présenter plusieurs personnalisations. Le client voit chaque artwork une seule fois avec les caractéristiques de ses marquages.</p>
+    <div className="aw-proof-grid">{current.map(view)}</div>
+    {!readOnly && markings.length > 0 && <details><summary>Importer un artwork commun</summary><WorkflowForm intent="add-article-proofs" caseId={dossier.id} label="Enregistrer l’artwork"><input type="hidden" name="itemId" value={item.id}/><MarkingChoices markings={markings}/><GroupChoices dossier={dossier} item={item}/><label>Artwork image ou PDF<input required type="file" name="proofImages" accept="image/png,image/jpeg,image/webp,application/pdf" multiple/></label><p>PNG, JPG, WebP ou PDF, 20 Mo maximum par fichier. Tous les marquages sont sélectionnés par défaut.</p></WorkflowForm></details>}
+    {history.length > 0 && <details><summary>Historique des artworks ({history.length})</summary><div className="aw-proof-grid">{history.map(view)}</div></details>}
   </section>;
 }
 function SendPreview({ dossier, mode, subject, message }) {
   const [open, setOpen] = useState(false);
   const requiredIds = dossier.items.filter((i) => i.requirement === "required").map((i) => i.lineItemId);
-  const proofs = dossier.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, productTitle: personalizationLabel(p, { english: true }) })));
+  const proofs = uniqueProofs(dossier.personalizations.filter((p) => requiredIds.includes(p.lineItemId)).flatMap((p) => currentProofs(p).filter((proof) => proof.status === "en_attente" && (mode === "reminder" ? proof.envoyeLe : !proof.envoyeLe)).map((proof) => ({ ...proof, productTitle: artworkLabel(proof, { english: true }) }))));
   if (!proofs.length) return null;
   const summary = summarizeCase(dossier.items, dossier.personalizations); const blocked = summary.missing || summary.pendingQualification;
   const name = `${dossier.name}${dossier.yachtName ? ` / ${dossier.yachtName}` : ""}`;
@@ -319,6 +371,7 @@ function DossierView({ dossier, shop, emailSubject, emailMessage }) {
         {dossier.personalizations.filter((p) => p.lineItemId === item.lineItemId).map((p) => <PersonalizationView key={p.id} p={p} item={item} dossier={dossier}/>)}
         {item.requirement === "required" && !dossier.archivedAt && <button className="aw-button" onClick={() => setEditor(item.id)}>Ajouter une personnalisation</button>}
         {editor === item.id && <PersonalizationEditor dossier={dossier} item={item} onClose={() => setEditor(null)}/>}
+        <ArticleArtworks dossier={dossier} item={item}/>
       </section>)}
     </>}
   </>;

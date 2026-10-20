@@ -1,5 +1,6 @@
+import { renderArtworkSummary } from "./artwork-summary-pdf.server.js";
 import { personalizationFileName, personalizationLabel } from "./personalization";
-import { currentProofs, fileExtension, isPersonalizationApproved } from "./artwork-status";
+import { currentProofs, artworkMarkings, fileExtension, isPersonalizationApproved } from "./artwork-status";
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
 import { getFromAddress } from "./email-from.server";
@@ -38,6 +39,8 @@ export async function sendKanbanCardEmail({
   const approvedProof = approvedProofs[0];
 
   const specRows = [
+    ["Variante / taille du vêtement", item.variantTitle],
+    ["Référence article", item.sku],
     ["Type", item.type],
     ["Quantité", item.quantity],
     ["Dimensions du marquage", item.dimensions],
@@ -59,6 +62,7 @@ export async function sendKanbanCardEmail({
   }
   for (const proof of approvedProofs) {
     attachments.push({ filename: personalizationFileName(item, proof.fileName || `BAT-V${proof.version}${fileExtension(proof.mimeType, proof.imageUrl)}`), path: proof.imageUrl });
+    attachments.push({ filename: `artwork-${proof.id.slice(-8)}-V${proof.version}-sizes.pdf`, content: (await renderArtworkSummary(proof)).toString("base64") });
   }
 
   const html = `
@@ -67,6 +71,7 @@ export async function sendKanbanCardEmail({
       <h3 style="margin:0 0 8px;">${escapeHtml(personalizationLabel(item))}</h3>
       ${message ? `<p>${escapeHtml(message)}</p>` : ""}
       ${specRows}
+      ${approvedProofs.some((proof) => artworkMarkings(proof, [item]).length > 1) ? '<p><strong>Artwork commun :</strong> le fichier peut présenter plusieurs marquages. Votre travail porte uniquement sur la variante, la technique et les caractéristiques indiquées ci-dessus.</p>' : ""}
       <p style="margin-top:16px;color:#555;">
         Le logo${approvedProof ? " et la BAT validé sont" : " est"} en
         pièce jointe de cet email.

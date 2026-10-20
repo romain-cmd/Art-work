@@ -1,3 +1,4 @@
+import { renderArtworkSummary } from "./artwork-summary-pdf.server.js";
 import { Resend } from "resend";
 import { applyPlaceholders } from "./email-template.server";
 import { getFromAddress } from "./email-from.server";
@@ -17,6 +18,7 @@ export async function sendProofValidationEmail({
   to,
   orderName,
   items,
+  artworks = [],
   reviewUrl,
   subjectTemplate,
   messageTemplate,
@@ -57,6 +59,7 @@ export async function sendProofValidationEmail({
     to: [to],
     subject,
     html,
+    attachments: await Promise.all(artworks.map(async (proof) => ({ filename: `artwork-${proof.id.slice(-8)}-V${proof.version}-sizes.pdf`, content: (await renderArtworkSummary(proof)).toString("base64") }))),
   });
 
   if (error) {

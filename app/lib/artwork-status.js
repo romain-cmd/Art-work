@@ -1,3 +1,4 @@
+import { artworkSummary } from "./artwork-groups.js";
 export const ARTWORK_TAG = "ARTWORK_REQUIRED";
 export const CASE_STATUSES = {
   a_personnaliser: { label: "À préparer", action: "Préparer les BAT", color: "#a15c00" },
@@ -7,7 +8,7 @@ export const CASE_STATUSES = {
   valide: { label: "BAT validés", action: "Voir le dossier", color: "#137547" },
   sans_bat: { label: "Sans BAT requis", action: "Voir le dossier", color: "#526277" },
 };
-export const currentProofs = (p) => (p.proofs || []).filter((proof) => proof.isCurrent !== false);
+export const currentProofs = (p) => (p.proofs || []).filter((proof) => proof.isCurrent !== false && !proof.deletedAt);
 export const isPersonalizationApproved = (p) => {
   const proofs = currentProofs(p);
   return proofs.length > 0 && proofs.every((proof) => proof.status === "approuve");
@@ -16,7 +17,7 @@ export function summarizeCase(items, personalizations) {
   const active = items.filter((i) => i.isActive !== false);
   const ps = personalizations.filter((p) => p.isActive !== false && active.some((i) => i.lineItemId === p.lineItemId && i.requirement === "required"));
   const required = active.filter((i) => i.requirement === "required");
-  const proofs = ps.flatMap(currentProofs);
+  const proofs = uniqueProofs(ps.flatMap(currentProofs));
   const approved = proofs.filter((p) => p.status === "approuve").length;
   const pendingQualification = active.some((i) => i.requirement === "pending");
   const missing = required.some((item) => {
@@ -44,4 +45,21 @@ export function fileExtension(mime, url = "") {
 }
 export function acceptsBat(file) {
   return file && file.size > 0 && file.size <= 20 * 1024 * 1024 && ["image/png", "image/jpeg", "image/webp", "application/pdf"].includes(file.type);
+}
+
+export function uniqueProofs(proofs) {
+  const seen = new Set();
+  return proofs.filter((p) => !p.id || (!seen.has(p.id) && seen.add(p.id)));
+}
+export function snapshotArtwork(markings, items = []) {
+  return { ...snapshotPersonalization(markings[0]), personalizations: markings.map((p) => ({ ...snapshotPersonalization(p), lineItemId: p.lineItemId,
+    variantTitle: items.find((i) => i.lineItemId === p.lineItemId)?.variantTitle || null })),
+    articles: items.map((i) => ({ lineItemId: i.lineItemId, title: i.title, variantTitle: i.variantTitle, sizeLabel: i.sizeLabel, colorLabel: i.colorLabel, sku: i.sku, quantity: i.quantity })) };
+}
+export function artworkMarkings(proof, fallback = []) {
+  return proof.snapshot?.personalizations || proof.personalizations || (proof.snapshot ? [proof.snapshot] : fallback);
+}
+export function artworkLabel(proof, { english = false } = {}) {
+  const markings = artworkSummary(proof).length ? artworkSummary(proof) : artworkMarkings(proof, proof.personalization ? [proof.personalization] : []);
+  return `${markings[0]?.productTitle || (english ? "Artwork" : "Artwork")} · ${markings.length} ${english ? "marking(s)" : "marquage(s)"}`;
 }

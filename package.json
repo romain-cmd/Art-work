@@ -18,7 +18,7 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
-    "test:artwork": "node --test app/lib/artwork-status.test.js app/lib/draft-order-sync.test.js app/lib/personalization.test.js tests/artwork/workflow.test.mjs",
+    "test:artwork": "node --test app/lib/artwork-status.test.js app/lib/draft-order-sync.test.js app/lib/personalization.test.js app/lib/artwork-groups.test.js tests/artwork/*.test.mjs",
     "test:deliveries": "node --test app/lib/delivery*.test.js"
   },
   "type": "module",

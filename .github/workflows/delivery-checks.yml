@@ -53,7 +53,7 @@ jobs:
         run: |
           mkdir -p test-results
           set -o pipefail
-          node --test app/lib/*.test.js tests/artwork/workflow.test.mjs | tee test-results/tests.txt
+          node --test app/lib/*.test.js tests/artwork/*.test.mjs | tee test-results/tests.txt
       - name: Production build
         run: npm run build
       - name: Browser test dependencies
