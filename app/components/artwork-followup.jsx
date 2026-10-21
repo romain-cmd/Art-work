@@ -1,6 +1,7 @@
 /* eslint-disable react/prop-types */
 import { useState } from "react";
 import { correctionFingerprint, correctionGroups } from "../lib/artwork-correction";
+import { isPersonalizationApproved } from "../lib/artwork-status";
 
 export function ArtworkCorrectionEditor({ dossier, proof, Form, Comparison, onDone, onCancel }) {
   const [source] = useState(dossier);
@@ -28,15 +29,15 @@ export function ArtworkCorrectionEditor({ dossier, proof, Form, Comparison, onDo
 }
 
 export function ArtworkPartnerForm({ dossier, proof, partners, Form, onDone, onCancel }) {
-  const [source] = useState(dossier); const [groups] = useState(() => correctionGroups(source, proof));
-  const [selected, setSelected] = useState(groups.map((g) => g.key));
+  const [source] = useState(dossier); const [groups] = useState(() => correctionGroups(source, proof).map((g) => ({ ...g, ready: g.members.every((m) => isPersonalizationApproved(source.personalizations.find((p) => p.id === m.id))) })));
+  const [selected, setSelected] = useState(groups.filter((g) => g.ready).map((g) => g.key));
   const suggestion = (keys) => { const emails = groups.filter((g) => keys.includes(g.key)).map((g) => partners[g.type] || ""); return emails.length && emails.every((s) => s && s === emails[0]) ? emails[0] : ""; };
-  const [email, setEmail] = useState(() => suggestion(groups.map((g) => g.key)));
+  const [email, setEmail] = useState(() => suggestion(groups.filter((g) => g.ready).map((g) => g.key)));
   const toggle = (key, checked) => { const next = checked ? [...selected, key] : selected.filter((id) => id !== key); if (!email || email === suggestion(selected)) setEmail(suggestion(next)); setSelected(next); };
   return <section className="aw-editor" aria-label="Envoi au prestataire"><div className="aw-between"><h3>Envoyer le BAT validé au prestataire</h3><button className="aw-button" onClick={onCancel}>Annuler l’envoi</button></div>
     <Form intent="email-artwork" caseId={dossier.id} label="Confirmer l’envoi au prestataire" onDone={onDone}>
       <input type="hidden" name="proofId" value={proof.id}/><input type="hidden" name="artworkFingerprint" value={correctionFingerprint(source, proof)}/>
-      <fieldset><legend>Marquages confiés à ce prestataire</legend>{groups.map((g) => <label className="aw-check" key={g.key}><input type="checkbox" checked={selected.includes(g.key)} onChange={(e) => toggle(g.key, e.target.checked)}/>{g.type} · {g.location} · {g.members.reduce((n, m) => n + m.quantity, 0)} pièces{selected.includes(g.key) && g.members.map((m) => <input key={m.id} type="hidden" name="targetMarkingId" value={m.id}/>)}</label>)}</fieldset>
+      <fieldset><legend>Marquages confiés à ce prestataire</legend>{groups.map((g) => <label className="aw-check" key={g.key}><input type="checkbox" disabled={!g.ready} checked={selected.includes(g.key)} onChange={(e) => toggle(g.key, e.target.checked)}/>{g.type} · {g.location} · {g.members.reduce((n, m) => n + m.quantity, 0)} pièces{!g.ready ? " · autres vues de ce marquage à valider" : ""}{selected.includes(g.key) && g.members.map((m) => <input key={m.id} type="hidden" name="targetMarkingId" value={m.id}/>)}</label>)}</fieldset>
       <label>Email du prestataire<input type="email" name="partnerEmail" required value={email} onChange={(e) => setEmail(e.target.value)}/></label>
       <label className="aw-check"><input type="checkbox" name="rememberPartner"/>Mémoriser cette adresse pour les techniques sélectionnées</label>
       <h4>Pièces jointes</h4><ul><li>BAT V{proof.version} validé : {proof.fileName || "artwork"}</li><li>Récapitulatif PDF des tailles et quantités du BAT</li><li>Logos sources des marquages sélectionnés, dans leur format d’origine</li></ul>

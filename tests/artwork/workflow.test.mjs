@@ -123,6 +123,16 @@ test("provider sending rejects unapproved, foreign, stale or incomplete selectio
   assert.equal((await env.routes.artwork.action({ request: request(await artworkFollowup("email-artwork", { targetMarkingId: ["marking-chest001"], partnerEmail: "provider@example.test" })) })).success, true);
 });
 
+test("a validated BAT can be sent while unrelated articles wait, but incomplete views and production stay blocked", async () => {
+  env.reset(); const { state } = env.fixture;
+  state.artworkItem.push({ ...state.artworkItem[0], id: "other", lineItemId: "other-line", variantId: "other-variant", productId: "other-product", title: "Sweat", requirement: "pending" });
+  assert.equal((await env.routes.artwork.action({ request: request(await artworkFollowup("email-artwork", { targetMarkingId: ["marking-chest001"], partnerEmail: "provider@example.test" })) })).success, true);
+  assert.ok((await env.routes.production.action({ request: request({ intent: "move-card", cardId: "card-chest", status: "termine" }) })).error);
+  state.proof.push({ ...structuredClone(state.proof[0]), id: "incomplete-view", token: "incomplete-view-token", status: "en_attente", envoyeLe: null });
+  assert.equal((await env.routes.artwork.action({ request: request(await artworkFollowup("email-artwork", { targetMarkingId: ["marking-chest001"], partnerEmail: "provider@example.test" })) })).success, false);
+  assert.equal(env.fixture.emails.length, 1);
+});
+
 test("guided preparation saves two markings across sizes atomically with separate garment and marking totals", async () => {
   freshBuilder(); const data = builderData();
   const rows = JSON.parse(data.markings); rows.push({ key: "second", type: "Impression", location: "Dos", quantities: { article: 12, large: 15 } }); data.markings = JSON.stringify(rows);
