@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { fixtureServer } from "./fixture.mjs";
 import { builderFingerprint } from "../../app/lib/artwork-workspace.js";
 import { savePreparedArtwork } from "../../app/lib/artwork-builder.server.js";
+import { correctionFingerprint, correctionGroups } from "../../app/lib/artwork-correction.js";
 
 const env = await fixtureServer();
 test.after(() => env.server.close());
@@ -26,6 +27,101 @@ function freshBuilder() {
   state.personalization = []; state.proof = []; state.kanbanCard = [];
   state.artworkItem.push({ ...state.artworkItem[0], id: "large", lineItemId: "line-L", variantId: "variant-L", variantTitle: "Navy / L", sizeLabel: "L", quantity: 30, requirement: "pending" });
 }
+
+async function artworkFollowup(intent, extra = {}) {
+  const live = (await env.routes.artwork.loader({ request: new Request("http://localhost/app/personnalisation?case=case") })).selected;
+  const proof = env.fixture.state.proof.find((pr) => pr.isCurrent);
+  const groups = correctionGroups(live, proof).map((g) => ({ ...g, quantities: Object.fromEntries(g.members.map((m) => [m.id, m.quantity])) }));
+  return { intent, caseId: "case", proofId: proof.id, artworkFingerprint: correctionFingerprint(live, proof), corrections: JSON.stringify(groups), ...extra };
+}
+
+test("full correction changes techniques and placements for every grouped size and keeps old replies", async () => {
+  freshBuilder();
+  assert.equal((await env.routes.artwork.action({ request: request(builderData()) })).success, true);
+  const { state } = env.fixture; const old = state.proof[0]; old.status = "modification_demandee"; old.envoyeLe = new Date(); old.commentaireClient = "Please engrave the sleeve instead.";
+  for (const card of state.kanbanCard) Object.assign(card, { status: "termine", lastSentTo: "old-partner@example.test", lastSentAt: new Date() });
+  const data = await artworkFollowup("correct-artwork", { proofImages: new File(["corrected"], "sleeve.png", { type: "image/png" }) });
+  const rows = JSON.parse(data.corrections); rows[0].type = "Gravure"; rows[0].location = "Manche"; rows[0].dimensions = "60 × 20 mm"; rows[0].color = "White"; rows[0].customText = "New Yacht"; data.corrections = JSON.stringify(rows);
+  assert.equal((await env.routes.artwork.action({ request: request(data) })).success, true);
+  assert.equal(state.proof.filter((p) => p.isCurrent).length, 1);
+  const next = state.proof.find((p) => p.isCurrent);
+  assert.equal(next.version, 2); assert.equal(next.fileName, "sleeve.png"); assert.equal(next.status, "en_attente"); assert.equal(next.envoyeLe, null);
+  assert.equal(next.snapshot.articles.reduce((n, i) => n + i.quantity, 0), 50);
+  assert.ok(state.personalization.every((p) => p.type === "Gravure" && p.location === "Manche" && p.customText === "New Yacht"));
+  assert.ok(next.snapshot.personalizations.every((p) => p.type === "Gravure"));
+  assert.equal(old.snapshot.personalizations[0].type, "Broderie"); assert.equal(old.commentaireClient, "Please engrave the sleeve instead.");
+  assert.ok(state.kanbanCard.every((c) => c.status === "a_faire" && c.lastSentTo === "old-partner@example.test"));
+  assert.equal(env.fixture.emails.length, 0);
+  assert.ok((await env.routes.review.action({ request: request({ token: old.token, decision: "approuve" }) })).error);
+  assert.equal((await env.routes.artwork.action({ request: request(data) })).success, false, "old version cannot be corrected twice");
+});
+
+test("full correction revises other views sharing changed specs only once", async () => {
+  freshBuilder(); await env.routes.artwork.action({ request: request(builderData()) });
+  const { state } = env.fixture;
+  const primary = state.proof[0]; primary.status = "approuve";
+  state.proof.push({ ...structuredClone(primary), id: "second-view", token: "second-view-token", version: 1 });
+  const data = await artworkFollowup("correct-artwork", { proofImages: new File(["file"], "changed.png", { type: "image/png" }) });
+  const rows = JSON.parse(data.corrections); rows[0].location = "Dos"; data.corrections = JSON.stringify(rows);
+  assert.equal((await env.routes.artwork.action({ request: request(data) })).success, true);
+  const current = state.proof.filter((p) => p.isCurrent);
+  assert.equal(current.length, 2); assert.ok(current.every((p) => p.version === 2 && p.status === "en_attente"));
+  assert.ok(current.every((p) => p.snapshot.personalizations.every((m) => m.location === "Dos")));
+});
+
+test("full correction rejects missing files, foreign rows, quantities and stale data without partial saves", async () => {
+  for (const scenario of ["file", "foreign", "quantity", "stale"]) {
+    env.reset(); const before = structuredClone(env.fixture.state.personalization);
+    const data = await artworkFollowup("correct-artwork", { proofImages: new File(["file"], "changed.png", { type: "image/png" }) });
+    const rows = JSON.parse(data.corrections);
+    if (scenario === "file") delete data.proofImages;
+    if (scenario === "foreign") rows[0].key = "foreign";
+    if (scenario === "quantity") rows[0].quantities["marking-chest001"] = 21;
+    if (scenario === "stale") data.artworkFingerprint = "old";
+    data.corrections = JSON.stringify(rows);
+    assert.equal((await env.routes.artwork.action({ request: request(data) })).success, false, scenario);
+    assert.deepEqual(env.fixture.state.personalization, before); assert.equal(env.fixture.state.proof.length, 1);
+  }
+});
+
+test("approved common BAT sends once per provider with only assigned marking quantities and logos", async () => {
+  freshBuilder(); const data = builderData(); const rows = JSON.parse(data.markings);
+  rows.push({ key: "back", type: "Impression", location: "Dos", quantities: { article: 12, large: 15 } }); data.markings = JSON.stringify(rows);
+  await env.routes.artwork.action({ request: request(data) });
+  const { state } = env.fixture; const proof = state.proof[0]; proof.status = "approuve";
+  const chest = state.personalization.filter((p) => p.type === "Broderie"); const back = state.personalization.filter((p) => p.type === "Impression");
+  chest.forEach((p) => Object.assign(p, { logoUrl: "https://example.test/chest.ai", logoMimeType: "application/illustrator" }));
+  back.forEach((p) => Object.assign(p, { logoUrl: "https://example.test/back.pdf", logoMimeType: "application/pdf" }));
+  const send = await artworkFollowup("email-artwork", { targetMarkingId: chest.map((p) => p.id), partnerEmail: "embroidery@example.test", rememberPartner: "on" });
+  assert.equal((await env.routes.artwork.action({ request: request(send) })).success, true);
+  const mail = env.fixture.emails[0];
+  assert.equal(mail.attachments.length, 3, "one artwork, one summary PDF and one deduplicated source logo");
+  assert.match(mail.html, /Navy \/ M : 20 pièce/); assert.match(mail.html, /Navy \/ L : 30 pièce/);
+  assert.match(mail.html, /Broderie/); assert.doesNotMatch(mail.html, /<h3>.*Impression/);
+  assert.ok(mail.attachments.some((a) => a.path === "https://example.test/chest.ai"));
+  assert.ok(!mail.attachments.some((a) => a.path === "https://example.test/back.pdf"));
+  assert.equal(proof.partnerSentTo, "embroidery@example.test");
+  assert.ok(state.kanbanCard.filter((c) => chest.some((p) => p.id === c.personalizationId)).every((c) => c.lastSentTo === "embroidery@example.test"));
+  assert.ok(state.kanbanCard.filter((c) => back.some((p) => p.id === c.personalizationId)).every((c) => !c.lastSentTo));
+  assert.equal(state.partnerEmail[0].type, "Broderie");
+  assert.equal((await env.routes.artwork.action({ request: request(await artworkFollowup("email-artwork", { targetMarkingId: back.map((p) => p.id), partnerEmail: "print@example.test" })) })).success, true);
+  assert.equal(env.fixture.emails.length, 2); assert.match(env.fixture.emails[1].html, /27/);
+});
+
+test("provider sending rejects unapproved, foreign, stale or incomplete selections and supports an approved draft", async () => {
+  for (const scenario of ["pending", "foreign", "stale", "empty", "email"]) {
+    env.reset(); const data = await artworkFollowup("email-artwork", { targetMarkingId: ["marking-chest001"], partnerEmail: "provider@example.test" });
+    if (scenario === "pending") env.fixture.state.proof[0].status = "en_attente";
+    if (scenario === "foreign") data.targetMarkingId = ["foreign"];
+    if (scenario === "stale") data.artworkFingerprint = "stale";
+    if (scenario === "empty") data.targetMarkingId = [];
+    if (scenario === "email") data.partnerEmail = "invalid";
+    assert.equal((await env.routes.artwork.action({ request: request(data) })).success, false);
+    assert.equal(env.fixture.emails.length, 0);
+  }
+  env.reset(); env.fixture.draft.order = null; env.fixture.state.artworkCase[0].orderId = null;
+  assert.equal((await env.routes.artwork.action({ request: request(await artworkFollowup("email-artwork", { targetMarkingId: ["marking-chest001"], partnerEmail: "provider@example.test" })) })).success, true);
+});
 
 test("guided preparation saves two markings across sizes atomically with separate garment and marking totals", async () => {
   freshBuilder(); const data = builderData();

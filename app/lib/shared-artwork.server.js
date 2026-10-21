@@ -24,12 +24,12 @@ export async function reopenArtworkProduction(db, markings, caseId) {
 }
 
 // Reconcile all changed markings together, so one shared file gets one new version.
-export async function invalidateArtworks(db, changed, caseId, reason) {
+export async function invalidateArtworks(db, changed, caseId, reason, excludedProofIds = []) {
   if (!changed.length) return;
   const old = await db.proof.findMany({ where: { isCurrent: true, deletedAt: null,
     personalizations: { some: { id: { in: changed.map((p) => p.id) } } } }, include: { personalizations: true } });
   const affected = new Map(changed.map((p) => [p.id, p]));
-  for (const proof of old) {
+  for (const proof of old.filter((pr) => !excludedProofIds.includes(pr.id))) {
     const activeItems = await db.artworkItem.findMany({ where: { shop: proof.personalization?.shop || proof.personalizations[0].shop, draftOrderId: proof.personalizations[0].draftOrderId,
       lineItemId: { in: proof.personalizations.map((p) => p.lineItemId) }, isActive: true, requirement: "required" } });
     const markings = proof.personalizations.filter((p) => p.isActive && activeItems.some((i) => i.lineItemId === p.lineItemId));
@@ -40,5 +40,5 @@ export async function invalidateArtworks(db, changed, caseId, reason) {
     for (const p of proof.personalizations) affected.set(p.id, p);
   }
   await reopenArtworkProduction(db, [...affected.values()], caseId);
-  if (old.length) await db.artworkEvent.create({ data: { caseId, actor: "Équipe", message: `${reason} Nouvelle validation des artworks concernés requise.` } });
+  if (old.some((pr) => !excludedProofIds.includes(pr.id))) await db.artworkEvent.create({ data: { caseId, actor: "Équipe", message: `${reason} Nouvelle validation des artworks concernés requise.` } });
 }
