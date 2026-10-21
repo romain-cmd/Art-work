@@ -5,7 +5,7 @@ import { DEFAULT_PARTNER_EMAIL_MESSAGE, DEFAULT_PARTNER_EMAIL_SUBJECT } from "./
 import { renderArtworkSummary } from "./artwork-summary-pdf.server.js";
 import { artworkSummary, sizeSummary } from "./artwork-groups.js";
 import { fileExtension } from "./artwork-status.js";
-import { personalizationLabel } from "./personalization.js";
+import { personalizationFileName, personalizationLabel } from "./personalization.js";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const escape = (s) => String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -21,7 +21,7 @@ export async function sendArtworkPartnerEmail({ to, orderName, proof, markings, 
   const logos = new Set();
   for (const p of markings) if (p.logoUrl && !logos.has(p.logoUrl)) {
     logos.add(p.logoUrl);
-    attachments.push({ filename: `logo-${p.id.slice(-8)}${fileExtension(p.logoMimeType, p.logoUrl)}`, path: p.logoUrl });
+    attachments.push({ filename: personalizationFileName(p, p.logoFileName || `logo${fileExtension(p.logoMimeType, p.logoUrl)}`), path: p.logoUrl });
   }
   const details = grouped.map((p) => {
     const members = markings.filter((m) => ["type", "location", "dimensions", "color", "customText", "logoUrl"].every((k) => (m[k] || "") === (p[k] || "")));
