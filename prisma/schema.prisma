@@ -77,6 +77,8 @@ model Proof {
   token             String    @unique @default(cuid())
   envoyeLe          DateTime?
   reponduLe         DateTime?
+  partnerSentAt     DateTime?
+  partnerSentTo     String?
   createdAt         DateTime  @default(now())
 }
 

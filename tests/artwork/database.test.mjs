@@ -59,10 +59,12 @@ test("Prisma shares one proof across two markings and preserves the old approval
     const proof = await db.$transaction((tx) => createArtwork(tx, markings, { imageUrl: "https://example.test/common.pdf", mimeType: "application/pdf", fileName: "common.pdf" }));
     const linked = await db.personalization.findMany({ where: { shop }, include: { proofs: true } });
     assert.ok(linked.every((p) => p.proofs.length === 1 && p.proofs[0].id === proof.id));
-    await db.proof.update({ where: { id: proof.id }, data: { status: "approuve" } });
+    await db.proof.update({ where: { id: proof.id }, data: { status: "approuve", partnerSentAt: new Date(), partnerSentTo: "provider@example.test" } });
     const approved = await db.proof.findUnique({ where: { id: proof.id } });
     const next = await db.$transaction((tx) => createArtwork(tx, markings, { ...approved, imageUrl: "https://example.test/revised.pdf" }, approved));
     assert.equal(next.status, "en_attente");
+    assert.equal(next.partnerSentAt, null); assert.equal(next.partnerSentTo, null);
+    assert.equal(approved.partnerSentTo, "provider@example.test");
     assert.equal(next.version, 2);
     assert.equal(next.snapshot.articles.length, 2);
     assert.equal(next.snapshot.articles.reduce((sum, i) => sum + i.quantity, 0), 30);
